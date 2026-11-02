@@ -1,7 +1,11 @@
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Literal
+
+# Windows SID format: S-1-5-21-... (used as hardware fingerprint)
+_SID_RE = re.compile(r'^S-\d+-\d+(-\d+)+$')
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -29,6 +33,7 @@ class Credentials(Input):
 
 class ApplicationCredentials(Credentials):
     password: str = Field(min_length=1)
+    hardware_id: str = Field(min_length=10, max_length=256)  # required – Windows SID e.g. S-1-5-21-...
 
 
 class Registration(ApplicationCredentials):
@@ -59,7 +64,7 @@ class Permission(Input):
 class LicenseCreate(Input):
     days: int = Field(default=30, ge=1, le=999, strict=True)
     permission: str = Field(default='premium', pattern=r'^[a-zA-Z0-9_.:-]{1,100}$')
-    hardware_bound: bool = False
+    # hardware_bound is always True — every key is SID-locked
 
 
 class LicenseExtension(Input):
@@ -281,15 +286,33 @@ def create_app(settings=None):
             if audience == 'client' and (user['console_only'] or user['role'] == 'admin'):
                 audit(db, 'login', 'denied')
                 deny('invalid_credentials')
+            # Enforce SID-based HWID lock for application (client) logins
+            if audience == 'client':
+                hw = getattr(body, 'hardware_id', None)
+                if not hw or not _SID_RE.match(hw):
+                    audit(db, 'login', 'denied')
+                    deny('hardware_required', 422)
+                hw_hash = digest(hw)
+                # Check users table for persistent hardware_hash column
+                user_cols = [r[1] for r in db.execute('PRAGMA table_info(users)').fetchall()]
+                if 'hardware_hash' in user_cols:
+                    stored = user['hardware_hash']
+                    if stored and stored != hw_hash:
+                        # SID doesn't match the bound SID — block login
+                        audit(db, 'login', 'denied')
+                        deny('hardware_mismatch', 403)
+                    if not stored:
+                        # First login — bind this SID permanently to the account
+                        db.execute('UPDATE users SET hardware_hash=? WHERE id=?', (hw_hash, user['id']))
             if audience == 'admin' and not website_allowed(user, settings):
                 audit(db, 'login.approval_required', 'denied', user['id'])
                 deny('website_approval_required', 403)
             if passwords.check_needs_rehash(user['password_hash']):
                 db.execute('UPDATE users SET password_hash=? WHERE id=?', (passwords.hash(body.password), user['id']))
+            hw_hash_for_session = digest(body.hardware_id) if getattr(body, 'hardware_id', None) else None
             sid = uid()
             db.execute('INSERT INTO sessions VALUES(?,?,?,?,0,?)',
-                       (sid, user['id'], audience, now() + settings.session_seconds,
-                        digest(body.hardware_id) if body.hardware_id else None))
+                       (sid, user['id'], audience, now() + settings.session_seconds, hw_hash_for_session))
             audit(db, 'login', 'allowed', user['id'])
             return issue(db, settings, sid)
 
@@ -299,6 +322,10 @@ def create_app(settings=None):
             throttle(db, 'register:' + (request.client.host if request.client else 'unknown'), 5, 300)
             if not body.license_key and not settings.registration:
                 deny('registration_disabled', 403)
+            # Always require a valid Windows SID as hardware_id
+            if not body.hardware_id or not _SID_RE.match(body.hardware_id):
+                deny('hardware_required', 422)
+            hw_hash = digest(body.hardware_id)
             name = body.username.lower()
             if name == settings.owner_username:
                 deny('registration_failed', 409)
@@ -307,20 +334,31 @@ def create_app(settings=None):
                 deny('registration_failed', 409)
             identifier = uid()
             if body.license_key:
-                if not body.hardware_id:
-                    deny('hardware_required', 422)
                 license = db.execute('SELECT * FROM licenses WHERE key_hash=?', (digest(body.license_key),)).fetchone()
                 if not license or license['revoked'] or license['frozen_at'] is not None or license['expires_at'] <= now() or license['user_id'] or license['hardware_hash']:
                     deny('invalid_license', 403)
-                db.execute('INSERT INTO users(id,username,password_hash,created_at,subscription_until) VALUES(?,?,?,?,?)',
-                           (identifier, name, passwords.hash(body.password), now(), license['expires_at']))
+                # Check users table supports hardware_hash column
+                user_cols = [r[1] for r in db.execute('PRAGMA table_info(users)').fetchall()]
+                if 'hardware_hash' in user_cols:
+                    db.execute('INSERT INTO users(id,username,password_hash,hardware_hash,created_at,subscription_until) VALUES(?,?,?,?,?,?)',
+                               (identifier, name, passwords.hash(body.password), hw_hash, now(), license['expires_at']))
+                else:
+                    db.execute('INSERT INTO users(id,username,password_hash,created_at,subscription_until) VALUES(?,?,?,?,?)',
+                               (identifier, name, passwords.hash(body.password), now(), license['expires_at']))
+                # Always bind the license to this SID
                 db.execute('UPDATE licenses SET user_id=?,hardware_bound=1,hardware_hash=? WHERE id=?',
-                           (identifier, digest(body.hardware_id), license['id']))
+                           (identifier, hw_hash, license['id']))
                 audit(db, 'registration', 'allowed', identifier)
                 audit(db, 'activation', 'allowed', identifier, license['id'])
                 return {'success': True}
-            db.execute('INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)',
-                       (identifier, name, passwords.hash(body.password), now()))
+            # Open registration — store hardware_hash on user
+            user_cols = [r[1] for r in db.execute('PRAGMA table_info(users)').fetchall()]
+            if 'hardware_hash' in user_cols:
+                db.execute('INSERT INTO users(id,username,password_hash,hardware_hash,created_at) VALUES(?,?,?,?,?)',
+                           (identifier, name, passwords.hash(body.password), hw_hash, now()))
+            else:
+                db.execute('INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)',
+                           (identifier, name, passwords.hash(body.password), now()))
             audit(db, 'registration', 'allowed', identifier)
             # Registration deliberately does not create a session.
             return {'success': True}
@@ -391,12 +429,13 @@ def create_app(settings=None):
             lic = db.execute('SELECT * FROM licenses WHERE key_hash=?', (digest(body.key),)).fetchone()
             if (not lic or lic['revoked'] or lic['frozen_at'] is not None or lic['expires_at'] <= now()
                 or (lic['user_id'] is not None and lic['user_id'] != user['id'])
-                or (lic['hardware_bound'] and not user['hardware_hash'])
+                or not user['hardware_hash']                              # must have SID bound
                 or (lic['hardware_hash'] and lic['hardware_hash'] != user['hardware_hash'])):
                 audit(db, 'activation', 'denied', user['id'])
                 deny('invalid_license', 403)
-            db.execute('UPDATE licenses SET user_id=?,hardware_hash=? WHERE id=?',
-                       (user['id'], user['hardware_hash'] if lic['hardware_bound'] else None, lic['id']))
+            # Always bind the license to the user's SID hash
+            db.execute('UPDATE licenses SET user_id=?,hardware_bound=1,hardware_hash=? WHERE id=?',
+                       (user['id'], user['hardware_hash'], lic['id']))
             db.execute('UPDATE users SET subscription_until=MAX(subscription_until,?) WHERE id=?',
                        (lic['expires_at'], user['id']))
             audit(db, 'activation', 'allowed', user['id'], lic['id'])
@@ -749,8 +788,8 @@ def create_app(settings=None):
                 key = generate()
             has_encrypted_keys = db.execute('SELECT 1 FROM licenses WHERE key_ciphertext IS NOT NULL LIMIT 1').fetchone()
             encrypted = cipher(settings, create=not has_encrypted_keys).encrypt(key.encode()).decode()
-            db.execute('INSERT INTO licenses(id,key_hash,expires_at,permission,hardware_bound,key_ciphertext) VALUES(?,?,?,?,?,?)',
-                       (identifier, digest(key), now() + body.days * 86400, body.permission, body.hardware_bound, encrypted))
+            db.execute('INSERT INTO licenses(id,key_hash,expires_at,permission,hardware_bound,key_ciphertext) VALUES(?,?,?,?,1,?)',
+                       (identifier, digest(key), now() + body.days * 86400, body.permission, encrypted))
             audit(db, 'admin.license.create', 'allowed', admin['id'], identifier)
             return {'success': True, 'id': identifier, 'key': key}
 

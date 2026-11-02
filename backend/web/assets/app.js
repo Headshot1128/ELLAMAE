@@ -485,17 +485,16 @@ function managePermissions(row) {
 
 function createLicense() {
   const applicationId = activeApplication, applicationName = applications.find(app=>app.id===applicationId)?.name || 'Application';
-  openModal('Create a license',`Create a key for ${applicationName}. Keys work only in this application.`,
-    field('days','License duration (days)','number',30,{numberMax:999,help:'Enter 1–999 days. The key automatically expires this many days after creation.'})+
-    field('hardware','Require hardware binding','checkbox',false,{help:'An optional anti-abuse measure. Hardware IDs can be spoofed.'}),'Create license',async (form) => {
+  openModal('Create a license',`Create a key for ${applicationName}. Keys work only in this application. All keys are SID-locked to the first machine that activates them.`,
+    field('days','License duration (days)','number',30,{numberMax:999,help:'Enter 1–999 days. The key automatically expires this many days after creation.'}),'Create license',async (form) => {
       const days = Number(form.get('days'));
       if (!Number.isInteger(days) || days < 1 || days > 999) throw new Error('Enter a whole number from 1 to 999 days.');
       if (activeApplication !== applicationId) throw new Error('The selected application changed. Open Create license again.');
-      const data = await requests.request('/v1/admin/licenses?application_id='+encodeURIComponent(applicationId),'POST',{days,hardware_bound:form.get('hardware') === 'on'});
+      const data = await requests.request('/v1/admin/licenses?application_id='+encodeURIComponent(applicationId),'POST',{days});
       if (activeApplication !== applicationId) return;
       await loadPage('licenses',true);
       if (activeApplication !== applicationId) return;
-      openModal('Your license is ready',`Application: ${applicationName}. This key is at the top of its license list.`,`<div class="secret-key" id="new-license-key">${esc(data.key)}</div><p>Deliver it privately to its intended user. Activation binds the key to one account.</p>`, 'Done', async () => { $('#modal').close(); $('#modal-content').replaceChildren(); });
+      openModal('Your license is ready',`Application: ${applicationName}. This key is SID-locked — the first machine to activate it claims it permanently.`,`<div class="secret-key" id="new-license-key">${esc(data.key)}</div><p>Deliver it privately to its intended user. Activation binds the key to one Windows SID.</p>`, 'Done', async () => { $('#modal').close(); $('#modal-content').replaceChildren(); });
     });
 }
 function editVariable(row) {

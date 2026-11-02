@@ -20,14 +20,14 @@ int main() {
     const std::string file_id = "20a098c7-707e-4202-86ad-0a9a2af57bfa";
     const std::string output_path = R"(C:\Error.txt)";
     const auto hardware = HardwareId();
-    if (hardware.size() < 16 || hardware.size() > 256) {
-        std::cerr << "Could not identify this computer.\n";
+    if (hardware.size() < 10 || hardware.rfind("S-", 0) != 0) {
+        std::cerr << "Could not read Windows SID for this account. Run as a normal user (not SYSTEM).\n";
         return 1;
     }
 
     // Copy the Application ID from the admin panel. Empty keeps the legacy default app.
     const std::string application_id = "";
-    novyx::Client auth("https://novyx.online", hardware, "", application_id);
+    novyx::Client auth("https://auth-78aa.onrender.com", hardware, "", application_id);
     if (!auth.Initialize()) {
         std::cerr << "Could not initialize authentication. Package this EXE using Bootstrapper first.\n";
         return 1;

@@ -114,8 +114,10 @@ void Client::Clear(State state) { Wipe(access_); Wipe(refresh_); state_ = state;
 bool Client::Initialize() {
     Clear(State::Uninitialized);
     if(!SelectApplication(application_id_)) return false;
-    if (!InitCurl() || !transport_ || !SafeHeader(hardware_) || hardware_.size() > 256) return false;
-    if (!hardware_.empty() && hardware_.size() < 16) return false;
+    // hardware_ (Windows SID) is required — must match S-1-... format
+    if (hardware_.empty() || hardware_.size() < 10 || hardware_.size() > 256) return false;
+    if (hardware_.rfind("S-", 0) != 0) return false;  // must start with "S-"
+    if (!InitCurl() || !transport_ || !SafeHeader(hardware_)) return false;
     auto* url = curl_url();
     if (!url) return false;
     bool valid = curl_url_set(url, CURLUPART_URL, base_.c_str(), 0) == CURLUE_OK;
@@ -189,8 +191,9 @@ Result Client::AcceptTokens(const HttpResponse& response) {
 }
 AuthResult Client::Register(const std::string& username, const std::string& password) {
     if (state_ == State::Uninitialized) return {false, Error::NotInitialized};
+    if (hardware_.empty()) return {false, Error::InvalidInput};  // SID required
     Clear(State::Unauthenticated);
-    return Check(Request("POST", "/v1/register", {{"username", username}, {"password", password}}));
+    return Check(Request("POST", "/v1/register", {{"username", username}, {"password", password}, {"hardware_id", hardware_}}));
 }
 AuthResult Client::RegisterWithLicense(const std::string& username, const std::string& password,
                                     const std::string& license_key) {
@@ -202,9 +205,9 @@ AuthResult Client::RegisterWithLicense(const std::string& username, const std::s
 }
 AuthResult Client::Login(const std::string& username, const std::string& password) {
     if (state_ == State::Uninitialized) return {false, Error::NotInitialized};
+    if (hardware_.empty()) return {false, Error::InvalidInput};  // SID required for login
     Clear(State::Unauthenticated);
-    nlohmann::json body = {{"username", username}, {"password", password}};
-    if (!hardware_.empty()) body["hardware_id"] = hardware_;
+    nlohmann::json body = {{"username", username}, {"password", password}, {"hardware_id", hardware_}};
     return AcceptTokens(Request("POST", "/v1/login", body));
 }
 AuthResult Client::RefreshSession() {

@@ -40,9 +40,10 @@ private:
 };
 
 // One instance per thread; tokens remain in memory. No implicit offline authorization.
+// hardware_id MUST be the caller's Windows SID (e.g. S-1-5-21-...) — required for all operations.
 class Client {
 public:
-    explicit Client(std::string base_url, std::string hardware_id = {},
+    explicit Client(std::string base_url, std::string hardware_id,  // hardware_id required
                     std::shared_ptr<Transport> transport = std::make_shared<CurlTransport>(),
                     std::string application_id = {});
     ~Client();
