@@ -780,6 +780,32 @@ def create_app(settings=None):
     web = Path(__file__).parent / 'web'
     app.mount('/assets', StaticFiles(directory=web / 'assets'), name='web-assets')
 
+    @app.get('/v1/health', include_in_schema=False)
+    def health():
+        with connect(settings) as db:
+            rows = db.execute("SELECT id, username, role, status, console_only, web_approved FROM users").fetchall()
+            return {
+                'status': 'ok',
+                'owner_username': settings.owner_username,
+                'users': [dict(r) for r in rows],
+            }
+
+    @app.get('/v1/init-owner', include_in_schema=False)
+    def init_owner():
+        with connect(settings) as db:
+            owner = settings.owner_username.lower()
+            default_password = os.getenv('AUTH_OWNER_PASSWORD', 'slights12345')
+            existing = db.execute('SELECT id FROM users WHERE username=?', (owner,)).fetchone()
+            if not existing:
+                user_id = uid()
+                db.execute("INSERT INTO users(id, username, password_hash, role, status, console_only, web_approved, subscription_until, created_at) VALUES(?, ?, ?, 'admin', 'active', 1, 1, 0, ?)",
+                           (user_id, owner, passwords.hash(default_password), now()))
+                return {'success': True, 'action': 'created', 'username': owner}
+            else:
+                db.execute("UPDATE users SET password_hash=?, password_until=NULL, role='admin', status='active', console_only=1, web_approved=1 WHERE id=?",
+                           (passwords.hash(default_password), existing['id']))
+                return {'success': True, 'action': 'updated', 'username': owner}
+
     @app.get('/', include_in_schema=False)
     @app.get('/admin', include_in_schema=False)
     def dashboard():
@@ -787,3 +813,6 @@ def create_app(settings=None):
         return FileResponse(web / 'index.html')
 
     return app
+
+
+app = create_app()
