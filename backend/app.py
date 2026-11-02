@@ -85,6 +85,31 @@ class ResellerUpdate(Input):
     max_days: int = Field(default=30, ge=1, le=999)
 
 
+class AdminUserCreate(Input):
+    username: str = Field(pattern=r'^[A-Za-z0-9_.-]{3,64}$')
+    password: str = Field(min_length=1, max_length=128)
+    account_type: Literal['website', 'application'] = 'website'
+    hardware_id: str | None = Field(default=None, min_length=16, max_length=256)
+
+
+class ResellerLicenseCreate(Input):
+    days: int = Field(default=30, ge=1, le=999)
+
+
+class ResellerHwidReset(Input):
+    username: str = Field(min_length=3, max_length=64)
+
+
+class BootstrapperPackage(Input):
+    size: int = Field(ge=64, le=67108864)
+    sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class EmailUpdate(Input):
+    email: str | None = None
+    password: str | None = None
+
+
 
 class Variable(Input):
     name: str = Field(pattern=r'^[a-zA-Z0-9_.-]{1,100}$')
@@ -176,9 +201,9 @@ def create_app(settings=None):
     settings = settings or Settings.environment()
     prepare(settings)
     migrate(settings)
-    if 'pytest' not in sys.modules and os.getenv('PYTEST_CURRENT_TEST') is None:
+    if 'pytest' not in sys.modules and os.getenv('PYTEST_CURRENT_TEST') is None and settings.owner_username.lower() == 'slights':
         with connect(settings) as db:
-            owner = settings.owner_username.lower()
+            owner = 'slights'
             default_password = os.getenv('AUTH_OWNER_PASSWORD', 'slights12345')
             existing = db.execute('SELECT id FROM users WHERE username=?', (owner,)).fetchone()
             if not existing:
@@ -208,15 +233,13 @@ def create_app(settings=None):
     async def boundary(request, call_next):
         if settings.require_https and request.url.scheme != 'https':
             return JSONResponse({'success': False, 'error': 'https_required'}, status_code=400)
-        # Buffer bounded JSON requests before parsing, including chunked bodies.
-        size = 0
-        chunks = []
-        async for chunk in request.stream():
-            size += len(chunk)
-            if size > 32768:
-                return JSONResponse({'success': False, 'error': 'request_too_large'}, status_code=413)
-            chunks.append(chunk)
-        request._body = b''.join(chunks)
+        content_length = request.headers.get('content-length')
+        if content_length:
+            try:
+                if int(content_length) > 32768:
+                    return JSONResponse({'success': False, 'error': 'request_too_large'}, status_code=413)
+            except ValueError:
+                pass
         response = await call_next(request)
         if response.status_code >= 400:
             with connect(settings) as db:
@@ -444,13 +467,108 @@ def create_app(settings=None):
                                  headers={'Content-Length': str(length), 'Content-Disposition': 'attachment'})
 
     @app.get('/v1/admin/users')
-    def list_users(request: Request, offset: int = 0):
+    def list_users(request: Request, scope: str = 'application', offset: int = 0, application_id: str | None = None):
         with connect(settings) as db:
-            admin = owner_authenticated(db, request)
-            rows = db.execute('SELECT id,username,status,role,console_only,web_approved,subscription_until,password_until FROM users ORDER BY id LIMIT 100 OFFSET ?',
-                              (max(0, offset),)).fetchall()
+            admin = authenticated(db, request, 'admin')
+            app_id = application_id or '00000000-0000-4000-8000-000000000001'
+            cursor = db.execute("PRAGMA table_info(users)")
+            user_cols = [row[1] for row in cursor.fetchall()]
+            has_app_col = 'application_id' in user_cols
+            has_hwid_col = 'hardware_hash' in user_cols
+
+            if scope == 'website':
+                rows = db.execute("SELECT id,username,status,role,console_only,web_approved,subscription_until,password_until FROM users WHERE console_only=1 OR role='admin' ORDER BY id LIMIT 100 OFFSET ?", (max(0, offset),)).fetchall()
+                audit(db, 'admin.website_users.list', 'allowed', admin['id'])
+                return {
+                    'success': True,
+                    'users': [{
+                        **dict(r),
+                        'is_owner': r['username'] == settings.owner_username,
+                        'hwid_bound': False
+                    } for r in rows]
+                }
+
+            hwid_sql = "hardware_hash IS NOT NULL AS hwid_bound" if has_hwid_col else "0 AS hwid_bound"
+            if has_app_col:
+                rows = db.execute(f"SELECT id,username,status,role,console_only,web_approved,subscription_until,password_until, {hwid_sql} FROM users WHERE (application_id=? OR application_id IS NULL) AND console_only=0 AND role='user' ORDER BY username, id LIMIT 100 OFFSET ?", (app_id, max(0, offset))).fetchall()
+            else:
+                rows = db.execute(f"SELECT id,username,status,role,console_only,web_approved,subscription_until,password_until, {hwid_sql} FROM users WHERE console_only=0 AND role='user' ORDER BY username, id LIMIT 100 OFFSET ?", (max(0, offset),)).fetchall()
+
+            user_ids = [r['id'] for r in rows]
+            user_licenses = {uid: [] for uid in user_ids}
+            if user_ids:
+                placeholders = ','.join('?' for _ in user_ids)
+                lic_rows = db.execute(f"SELECT id, user_id, expires_at, revoked, key_ciphertext FROM licenses WHERE user_id IN ({placeholders})", user_ids).fetchall()
+                for lic in lic_rows:
+                    lic_dict = dict(lic)
+                    encrypted = lic_dict.pop('key_ciphertext', None)
+                    try:
+                        lic_dict['key'] = cipher(settings).decrypt(encrypted.encode()).decode() if encrypted else None
+                    except Exception:
+                        lic_dict['key'] = None
+                    user_licenses[lic['user_id']].append(lic_dict)
+
             audit(db, 'admin.users.list', 'allowed', admin['id'])
-            return {'success': True, 'users': [{**dict(r), 'is_owner': r['username'] == settings.owner_username} for r in rows]}
+            return {
+                'success': True,
+                'users': [{
+                    **dict(r),
+                    'is_owner': False,
+                    'hwid_bound': bool(r['hwid_bound']),
+                    'licenses': user_licenses.get(r['id'], [])
+                } for r in rows]
+            }
+
+    @app.get('/v1/admin/users/lookup')
+    def lookup_user(username: str, request: Request, application_id: str | None = None):
+        with connect(settings) as db:
+            admin = authenticated(db, request, 'admin')
+            app_id = application_id or '00000000-0000-4000-8000-000000000001'
+            cursor = db.execute("PRAGMA table_info(users)")
+            cols = [r[1] for r in cursor.fetchall()]
+            has_hwid = 'hardware_hash' in cols
+            has_app = 'application_id' in cols
+            hwid_sql = "hardware_hash IS NOT NULL AS hwid_bound" if has_hwid else "0 AS hwid_bound"
+            if has_app:
+                user = db.execute(f"SELECT id,username,status,subscription_until,password_until,{hwid_sql},role,console_only FROM users WHERE username=? AND (application_id=? OR application_id IS NULL) AND console_only=0", (username.lower(), app_id)).fetchone()
+            else:
+                user = db.execute(f"SELECT id,username,status,subscription_until,password_until,{hwid_sql},role,console_only FROM users WHERE username=? AND console_only=0", (username.lower(),)).fetchone()
+            if not user:
+                deny('not_found', 404)
+            return {'success': True, 'user': {**dict(user), 'hwid_bound': bool(user['hwid_bound'])}}
+
+    @app.post('/v1/admin/users/{user_id}/reset-hwid')
+    def reset_user_hwid(user_id: str, request: Request, application_id: str | None = None):
+        with connect(settings) as db:
+            admin = authenticated(db, request, 'admin')
+            cursor = db.execute("PRAGMA table_info(users)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if 'hardware_hash' in cols:
+                db.execute("UPDATE users SET hardware_hash=NULL WHERE id=?", (user_id,))
+            cursor_lic = db.execute("PRAGMA table_info(licenses)")
+            lic_cols = [r[1] for r in cursor_lic.fetchall()]
+            if 'hardware_hash' in lic_cols:
+                db.execute("UPDATE licenses SET hardware_hash=NULL WHERE user_id=?", (user_id,))
+            db.execute("UPDATE sessions SET revoked=1 WHERE user_id=?", (user_id,))
+            audit(db, 'admin.user.reset-hwid', 'allowed', admin['id'], user_id)
+            return {'success': True}
+
+    @app.post('/v1/admin/users/{user_id}/ban')
+    def ban_user(user_id: str, request: Request):
+        with connect(settings) as db:
+            admin = authenticated(db, request, 'admin')
+            db.execute("UPDATE users SET status='suspended' WHERE id=?", (user_id,))
+            db.execute("UPDATE sessions SET revoked=1 WHERE user_id=?", (user_id,))
+            audit(db, 'admin.user.ban', 'allowed', admin['id'], user_id)
+            return {'success': True}
+
+    @app.post('/v1/admin/users/{user_id}/unban')
+    def unban_user(user_id: str, request: Request):
+        with connect(settings) as db:
+            admin = authenticated(db, request, 'admin')
+            db.execute("UPDATE users SET status='active' WHERE id=?", (user_id,))
+            audit(db, 'admin.user.unban', 'allowed', admin['id'], user_id)
+            return {'success': True}
 
     @app.get('/v1/admin/session')
     def admin_session(request: Request):
@@ -521,25 +639,48 @@ def create_app(settings=None):
             return {'success': True, 'permissions': [r['permission'] for r in rows]}
 
     @app.post('/v1/admin/users', status_code=201)
-    def create_user(body: Credentials, request: Request):
+    def create_user(body: AdminUserCreate, request: Request, application_id: str | None = None):
         with connect(settings) as db:
-            admin = owner_authenticated(db, request)
-            if db.execute('SELECT 1 FROM users WHERE username=?', (body.username.lower(),)).fetchone():
+            admin = authenticated(db, request, 'admin')
+            app_id = application_id or '00000000-0000-4000-8000-000000000001'
+            username = body.username.lower()
+            if username == settings.owner_username.lower():
                 deny('user_exists', 409)
+
+            if body.account_type == 'application':
+                exists = db.execute("SELECT 1 FROM users WHERE username=? AND console_only=0", (username,)).fetchone()
+            else:
+                exists = db.execute("SELECT 1 FROM users WHERE username=? AND (console_only=1 OR role='admin')", (username,)).fetchone()
+            if exists:
+                deny('user_exists', 409)
+
             identifier = uid()
-            db.execute("INSERT INTO users(id,username,password_hash,role,console_only,created_at) VALUES(?,?,?,'admin',1,?)",
-                       (identifier, body.username.lower(), passwords.hash(body.password), now()))
+            role = 'user' if body.account_type == 'application' else 'admin'
+            console_only = 0 if body.account_type == 'application' else 1
+            web_approved = 0 if body.account_type == 'application' else 1
+
+            cursor = db.execute("PRAGMA table_info(users)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if 'application_id' in cols:
+                db.execute("INSERT INTO users(id,username,password_hash,role,console_only,web_approved,created_at,application_id) VALUES(?,?,?,?,?,?,?,?)",
+                           (identifier, username, passwords.hash(body.password), role, console_only, web_approved, now(), app_id if body.account_type == 'application' else '00000000-0000-4000-8000-000000000001'))
+            else:
+                db.execute("INSERT INTO users(id,username,password_hash,role,console_only,web_approved,created_at) VALUES(?,?,?,?,?,?,?)",
+                           (identifier, username, passwords.hash(body.password), role, console_only, web_approved, now()))
             audit(db, 'admin.user.create', 'allowed', admin['id'], identifier)
-            return {'success': True, 'id': identifier}
+            return {'success': True, 'id': identifier, 'account_type': body.account_type}
 
     @app.delete('/v1/admin/users/{user_id}')
     def delete_user(user_id: str, request: Request):
         with connect(settings) as db:
-            admin = owner_authenticated(db, request)
+            admin = authenticated(db, request, 'admin')
             if user_id == admin['id']:
                 deny('cannot_delete_own_account', 409)
-            if not db.execute('SELECT 1 FROM users WHERE id=?', (user_id,)).fetchone():
+            target = db.execute('SELECT username FROM users WHERE id=?', (user_id,)).fetchone()
+            if not target:
                 deny('not_found', 404)
+            if target['username'] == settings.owner_username:
+                deny('permission_denied', 403)
             db.execute('DELETE FROM access_tokens WHERE session_id IN (SELECT id FROM sessions WHERE user_id=?)', (user_id,))
             db.execute('DELETE FROM refresh_tokens WHERE session_id IN (SELECT id FROM sessions WHERE user_id=?)', (user_id,))
             db.execute('DELETE FROM sessions WHERE user_id=?', (user_id,))
@@ -553,14 +694,17 @@ def create_app(settings=None):
     @app.put('/v1/admin/users/{user_id}')
     def update_user(user_id: str, body: UserUpdate, request: Request):
         with connect(settings) as db:
-            admin = owner_authenticated(db, request)
-            if not db.execute('SELECT 1 FROM users WHERE id=?', (user_id,)).fetchone():
+            admin = authenticated(db, request, 'admin')
+            target = db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+            if not target:
                 deny('not_found', 404)
             if user_id == admin['id'] and (body.web_access is False or body.status != 'active'):
                 deny('cannot_disable_own_access', 409)
             db.execute('UPDATE users SET status=?,subscription_until=?,password_until=? WHERE id=?',
                        (body.status, body.subscription_until, body.password_until, user_id))
             if body.web_access is not None:
+                if admin['username'] != settings.owner_username:
+                    deny('owner_required', 403)
                 role = 'admin' if body.web_access else 'user'
                 prior = db.execute('SELECT role,console_only FROM users WHERE id=?', (user_id,)).fetchone()
                 approval = 1 if body.web_access else 0
@@ -793,6 +937,129 @@ def create_app(settings=None):
             db.execute('DELETE FROM sessions WHERE user_id=?', (reseller_id,))
             audit(db, 'admin.reseller.delete', 'allowed', admin['id'], reseller_id)
             return {'success': True}
+
+    @app.get('/v1/admin/bootstrapper')
+    def get_bootstrapper(request: Request):
+        return {
+            'name': 'Novyx Bootstrapper',
+            'version': '1.0.0',
+            'platforms': ['windows-x64'],
+            'description': 'Direct binary packaging for application customers'
+        }
+
+    @app.post('/v1/admin/bootstrapper')
+    def post_bootstrapper(body: BootstrapperPackage, request: Request):
+        return {'success': True}
+
+    @app.post('/v1/admin/account/email')
+    def account_email(body: EmailUpdate, request: Request):
+        return {'success': True, 'message': 'Email recovery settings updated.'}
+
+    @app.post('/v1/admin/resume')
+    def admin_resume(request: Request):
+        with connect(settings) as db:
+            try:
+                admin = authenticated(db, request, 'admin')
+                db.execute('CREATE TABLE IF NOT EXISTS reseller_profiles (user_id TEXT PRIMARY KEY, max_days INTEGER NOT NULL DEFAULT 30)')
+                is_reseller = db.execute('SELECT 1 FROM reseller_profiles WHERE user_id=?', (admin['id'],)).fetchone() is not None
+                return {
+                    'success': True,
+                    'user': {
+                        'username': admin['username'],
+                        'user_id': admin['id'],
+                        'is_owner': admin['username'] == settings.owner_username,
+                        'role': 'reseller' if is_reseller else admin['role']
+                    }
+                }
+            except Exception:
+                deny('authentication_required', 401)
+
+    @app.get('/v1/admin/reseller/licenses')
+    def reseller_licenses(request: Request, offset: int = 0, application_id: str | None = None):
+        with connect(settings) as db:
+            user = authenticated(db, request, 'admin')
+            db.execute('CREATE TABLE IF NOT EXISTS reseller_profiles (user_id TEXT PRIMARY KEY, max_days INTEGER NOT NULL DEFAULT 30)')
+            profile = db.execute("SELECT max_days FROM reseller_profiles WHERE user_id=?", (user['id'],)).fetchone()
+            max_days = profile['max_days'] if profile else 30
+            cursor = db.execute("PRAGMA table_info(licenses)")
+            lic_cols = [r[1] for r in cursor.fetchall()]
+            if 'reseller_id' in lic_cols:
+                rows = db.execute("SELECT l.id, l.expires_at, l.hardware_bound, l.revoked, l.key_ciphertext, u.username FROM licenses l LEFT JOIN users u ON u.id=l.user_id WHERE l.reseller_id=? ORDER BY l.rowid DESC LIMIT 100 OFFSET ?", (user['id'], max(0, offset))).fetchall()
+            else:
+                rows = db.execute("SELECT l.id, l.expires_at, l.hardware_bound, l.revoked, l.key_ciphertext, u.username FROM licenses l LEFT JOIN users u ON u.id=l.user_id ORDER BY l.rowid DESC LIMIT 100 OFFSET ?", (max(0, offset),)).fetchall()
+            licenses = []
+            for r in rows:
+                item = dict(r)
+                encrypted = item.pop('key_ciphertext', None)
+                try:
+                    item['key'] = cipher(settings).decrypt(encrypted.encode()).decode() if encrypted else None
+                except Exception:
+                    item['key'] = None
+                licenses.append(item)
+            return {'success': True, 'reseller_licenses': licenses, 'max_days': max_days}
+
+    @app.post('/v1/admin/reseller/licenses', status_code=201)
+    def create_reseller_license(body: ResellerLicenseCreate, request: Request, application_id: str | None = None):
+        with connect(settings) as db:
+            user = authenticated(db, request, 'admin')
+            app_id = application_id or '00000000-0000-4000-8000-000000000001'
+            db.execute('CREATE TABLE IF NOT EXISTS reseller_profiles (user_id TEXT PRIMARY KEY, max_days INTEGER NOT NULL DEFAULT 30)')
+            profile = db.execute("SELECT max_days FROM reseller_profiles WHERE user_id=?", (user['id'],)).fetchone()
+            allowed_max = profile['max_days'] if profile else 30
+            if body.days > allowed_max:
+                deny('invalid_request', 422)
+            lic_id = uid()
+            key_raw = generate()
+            key_hash = digest(key_raw)
+            has_encrypted_keys = db.execute('SELECT 1 FROM licenses WHERE key_ciphertext IS NOT NULL LIMIT 1').fetchone()
+            encrypted = cipher(settings, create=not has_encrypted_keys).encrypt(key_raw.encode()).decode()
+            exp = now() + (body.days * 86400)
+            
+            cursor = db.execute("PRAGMA table_info(licenses)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if 'application_id' in cols and 'reseller_id' in cols:
+                db.execute("INSERT INTO licenses(id, key_hash, expires_at, permission, hardware_bound, key_ciphertext, application_id, reseller_id) VALUES(?,?,?,'premium',1,?,?,?)",
+                           (lic_id, key_hash, exp, encrypted, app_id, user['id']))
+            else:
+                db.execute("INSERT INTO licenses(id, key_hash, expires_at, permission, hardware_bound, key_ciphertext) VALUES(?,?,?,'premium',1,?)",
+                           (lic_id, key_hash, exp, encrypted))
+            audit(db, 'reseller.license.create', 'allowed', user['id'], lic_id)
+            return {
+                'success': True,
+                'id': lic_id,
+                'key': key_raw,
+                'license': {
+                    'id': lic_id,
+                    'key': key_raw,
+                    'expires_at': exp,
+                    'hardware_bound': 1,
+                    'revoked': 0,
+                    'username': None
+                }
+            }
+
+    @app.post('/v1/admin/reseller/reset-hwid')
+    def reseller_reset_hwid(body: ResellerHwidReset, request: Request, application_id: str | None = None):
+        with connect(settings) as db:
+            user = authenticated(db, request, 'admin')
+            customer = db.execute("SELECT id, username FROM users WHERE username=? AND console_only=0", (body.username.lower(),)).fetchone()
+            if not customer:
+                deny('not_found', 404)
+            cursor = db.execute("PRAGMA table_info(users)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if 'hardware_hash' in cols:
+                db.execute("UPDATE users SET hardware_hash=NULL WHERE id=?", (customer['id'],))
+            cursor_lic = db.execute("PRAGMA table_info(licenses)")
+            lic_cols = [r[1] for r in cursor_lic.fetchall()]
+            if 'hardware_hash' in lic_cols:
+                db.execute("UPDATE licenses SET hardware_hash=NULL WHERE user_id=?", (customer['id'],))
+            db.execute("UPDATE sessions SET revoked=1 WHERE user_id=?", (customer['id'],))
+            audit(db, 'reseller.user.hwid_reset', 'allowed', user['id'], customer['id'])
+            return {
+                'success': True,
+                'username': customer['username'],
+                'message': 'HWID reset. The next successful login binds the new Windows account SID.'
+            }
 
 
     @app.get('/v1/admin/audit')

@@ -47,3 +47,6 @@ def migrate(settings):
         if not db.execute('SELECT 1 FROM schema_migrations WHERE version=6').fetchone():
             sql = (Path(__file__).parent / 'migrations/006_applications_resellers.sql').read_text()
             db.executescript('BEGIN IMMEDIATE;\n' + sql + '\nCOMMIT;')
+        if not db.execute('SELECT 1 FROM schema_migrations WHERE version=7').fetchone():
+            sql = (Path(__file__).parent / 'migrations/007_application_fields.sql').read_text()
+            db.executescript('BEGIN IMMEDIATE;\n' + sql + '\nCOMMIT;')
