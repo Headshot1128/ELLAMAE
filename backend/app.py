@@ -997,6 +997,44 @@ def create_app(settings=None):
             audit(db, 'admin.application.update', 'allowed', admin['id'], app_id)
             return {'success': True}
 
+    @app.delete('/v1/admin/applications/{app_id}')
+    def delete_application(app_id: str, request: Request):
+        with connect(settings) as db:
+            admin = authenticated(db, request, 'admin')
+            if app_id == '00000000-0000-4000-8000-000000000001':
+                deny('invalid_request', 400)
+            db.execute('CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT \'active\', created_at INTEGER NOT NULL)')
+            row = db.execute('SELECT 1 FROM applications WHERE id=?', (app_id,)).fetchone()
+            if not row:
+                deny('not_found', 404)
+            
+            # Delete or reassign resources associated with this application
+            db.execute('DELETE FROM applications WHERE id=?', (app_id,))
+            cols = [r[1] for r in db.execute('PRAGMA table_info(users)').fetchall()]
+            if 'application_id' in cols:
+                db.execute('DELETE FROM users WHERE application_id=?', (app_id,))
+            lic_cols = [r[1] for r in db.execute('PRAGMA table_info(licenses)').fetchall()]
+            if 'application_id' in lic_cols:
+                db.execute('DELETE FROM licenses WHERE application_id=?', (app_id,))
+            var_cols = [r[1] for r in db.execute('PRAGMA table_info(variables)').fetchall()]
+            if 'application_id' in var_cols:
+                db.execute('DELETE FROM variables WHERE application_id=?', (app_id,))
+            file_cols = [r[1] for r in db.execute('PRAGMA table_info(files)').fetchall()]
+            if 'application_id' in file_cols:
+                files_to_delete = db.execute('SELECT storage_name FROM files WHERE application_id=?', (app_id,)).fetchall()
+                root = Path(settings.storage).resolve()
+                for f in files_to_delete:
+                    path = (root / f['storage_name']).resolve()
+                    if path.parent == root and path.is_file():
+                        try:
+                            path.unlink()
+                        except Exception:
+                            pass
+                db.execute('DELETE FROM files WHERE application_id=?', (app_id,))
+                
+            audit(db, 'admin.application.delete', 'allowed', admin['id'], app_id)
+            return {'success': True}
+
     @app.get('/v1/admin/resellers')
     def list_resellers(request: Request, offset: int = 0):
         with connect(settings) as db:

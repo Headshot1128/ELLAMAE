@@ -198,7 +198,7 @@ function rowMarkup(row) {
   if (currentView === 'resellers') cells=[`<div class="user-cell"><span class="avatar">${esc(row.username[0].toUpperCase())}</span><div><strong>${esc(row.username)}</strong><span class="cell-subtitle">Reseller account</span></div></div>`,badge(row.status,row.status==='active'?'':'warn'),`${esc(row.max_days)} days`,esc(stamp(row.created_at)),actions([['edit-reseller','Manage']])];
   else if(currentView==='reseller_licenses')cells=[`<strong class="license-key">${esc(row.key||'Unavailable')}</strong><span class="cell-subtitle">SID binding enabled</span>`,esc(row.username||'Ready to assign'),esc(stamp(row.expires_at)),badge(row.revoked?'Revoked':row.expires_at<=Date.now()/1000?'Expired':'Active',row.revoked?'bad':''),actions([['copy-license','Copy key']])];
   else if (currentView === 'applications') cells = [
-    `<strong>${esc(row.name)}</strong>`, `<code class=code-pill>${esc(row.id)}</code>`,badge(row.status,row.status==='active'?'':'warn'),actions([['copy-application','Copy ID'],['edit-application','Manage']])];
+    `<strong>${esc(row.name)}</strong>`, `<code class=code-pill>${esc(row.id)}</code>`,badge(row.status,row.status==='active'?'':'warn'),actions([['copy-application','Copy ID'],['edit-application','Manage'],...(row.id!=='00000000-0000-4000-8000-000000000001'?[['delete-application','Delete']]:[])])];
   else if (currentView === 'users') cells = [
     `<strong>${esc(row.username)}</strong>`,
     row.licenses?.length?row.licenses.map(license=>`<div><strong class=license-key>${esc(license.key||'Legacy key unavailable')}</strong><span class=cell-subtitle>${esc(license.revoked?'Revoked':license.expires_at<=Date.now()/1000?'Expired':'Active')} ? ${esc(stamp(license.expires_at))}</span></div>`).join(''):badge('No key registered','neutral'),
@@ -218,7 +218,7 @@ function rowMarkup(row) {
     `<code class="code-pill">${esc(row.permission)}</code>`, actions([['edit','Edit'],['delete','Delete']]) ];
   else if (currentView === 'files') cells = [
     `<strong>${esc(row.id)}</strong>`, `<code class="code-pill">${esc(row.storage_name)}</code>`, `<code class="code-pill">${esc(row.permission)}</code>`,
-    `${esc((row.max_bytes/1048576).toLocaleString(undefined,{maximumFractionDigits:2}))} MiB`, badge(row.enabled ? 'Enabled' : 'Disabled',row.enabled ? '' : 'neutral'), actions([['download-code','C++ download'],['edit','Manage']]) ];
+    `${esc((row.max_bytes/1048576).toLocaleString(undefined,{maximumFractionDigits:2}))} MiB`, badge(row.enabled ? 'Enabled' : 'Disabled',row.enabled ? '' : 'neutral'), actions([['download-code','C++ download'],['edit','Manage'],['delete-file','Delete']]) ];
   else cells = [ `<strong>${esc(eventName(row.event))}</strong><span class="cell-subtitle">#${esc(row.id)}</span>`, outcome(row.outcome), `<span title="${esc(row.actor_id)}">${esc(shortId(row.actor_id))}</span>`, `<span title="${esc(row.target)}">${esc(shortId(row.target))}</span>`, esc(stamp(row.timestamp)) ];
   return `<tr>${cells.map((value) => `<td>${value}</td>`).join('')}</tr>`;
 }
@@ -695,6 +695,12 @@ document.addEventListener('click',async (event) => {
   else if (action === 'permissions') managePermissions(row);
   else if (action === 'extend') extendLicense(row);
   else if (action === 'delete-user') confirmAction(`Delete ${row.username}?`,'This permanently deletes the account and personal variables, ends all its sessions, and revokes its assigned licenses.',() => api(`/v1/admin/users/${id}`,'DELETE'));
+  else if (action === 'delete-application') confirmAction(`Delete ${row.name}?`,'This permanently removes this application, its customer accounts, and associated licenses.',async () => {
+    await api(`/v1/admin/applications/${id}`,'DELETE');
+    pageCache.clear();
+    await loadApplications(DEFAULT_APPLICATION);
+  });
+  else if (action === 'delete-file') confirmAction(`Delete file ${shortId(row.id)}?`,'This permanently deletes this protected file from hosted storage and makes it unavailable for download.',() => api(`/v1/admin/files/${id}`,'DELETE'));
   else if (action === 'reset-hwid') confirmAction('Reset hardware binding?','The assigned account keeps this license. Its application sessions will be signed out, and the next activation can bind a new device.',() => api(`/v1/admin/licenses/${id}/reset-hwid`,'POST',{}));
   else if (action === 'freeze') { button.disabled = true; try { await api(`/v1/admin/licenses/${id}/freeze`,'POST'); await loadPage(); } catch(error) { toast(error.message); } finally { button.disabled = false; } }
   else if (action === 'revoke') confirmAction('Revoke and delete this license?','This permanently deletes the key from the license list. It will no longer authorize access.',() => api(`/v1/admin/licenses/${id}`,'DELETE'));
