@@ -22,7 +22,7 @@ class Input(BaseModel):
 
 class Credentials(Input):
     username: str = Field(pattern=r'^[A-Za-z0-9_.-]{3,64}$')
-    password: str = Field(min_length=12, max_length=128)
+    password: str = Field(min_length=1, max_length=128)
     hardware_id: str | None = Field(default=None, min_length=16, max_length=256)
 
 
@@ -76,7 +76,7 @@ class ApplicationUpdate(Input):
 
 class ResellerCreate(Input):
     username: str = Field(pattern=r'^[A-Za-z0-9_.-]{3,64}$')
-    password: str = Field(min_length=12, max_length=128)
+    password: str = Field(min_length=1, max_length=128)
     max_days: int = Field(default=30, ge=1, le=999)
 
 

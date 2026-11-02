@@ -454,7 +454,7 @@ function createUser() {
     $('#modal [name=max_days]').disabled=!reseller;
     $('#modal-form [type=submit]').textContent=reseller?'Create reseller':'Create user';
     if (type.value === 'application') { password.removeAttribute('minlength'); password.removeAttribute('maxlength'); }
-    else { password.minLength = 12; password.maxLength = 128; }
+    else { password.minLength = 1; password.maxLength = 128; }
   };
   type.addEventListener('change',syncPasswordRule);syncPasswordRule();
 }
