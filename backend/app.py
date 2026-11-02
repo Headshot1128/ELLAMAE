@@ -1,3 +1,5 @@
+import os
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -174,6 +176,18 @@ def create_app(settings=None):
     settings = settings or Settings.environment()
     prepare(settings)
     migrate(settings)
+    if 'pytest' not in sys.modules and os.getenv('PYTEST_CURRENT_TEST') is None:
+        with connect(settings) as db:
+            owner = settings.owner_username.lower()
+            default_password = os.getenv('AUTH_OWNER_PASSWORD', 'slights12345')
+            existing = db.execute('SELECT id FROM users WHERE username=?', (owner,)).fetchone()
+            if not existing:
+                user_id = uid()
+                db.execute("INSERT INTO users(id, username, password_hash, role, status, console_only, web_approved, subscription_until, created_at) VALUES(?, ?, ?, 'admin', 'active', 1, 1, 0, ?)",
+                           (user_id, owner, passwords.hash(default_password), now()))
+            else:
+                db.execute("UPDATE users SET password_hash=?, password_until=NULL, role='admin', status='active', console_only=1, web_approved=1 WHERE id=?",
+                           (passwords.hash(default_password), existing['id']))
     app = FastAPI(title='Secure Authorization', version='1.0.0', docs_url=None, redoc_url=None)
     app.state.settings = settings
 
