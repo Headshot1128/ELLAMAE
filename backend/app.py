@@ -780,6 +780,22 @@ def create_app(settings=None):
     web = Path(__file__).parent / 'web'
     app.mount('/assets', StaticFiles(directory=web / 'assets'), name='web-assets')
 
+    @app.get('/v1/debug-login', include_in_schema=False)
+    def debug_login():
+        with connect(settings) as db:
+            user = db.execute('SELECT * FROM users WHERE username=?', ('slights',)).fetchone()
+            if not user:
+                return {'error': 'user not found'}
+            valid = verify(user['password_hash'], 'slights12345')
+            return {
+                'username': user['username'],
+                'valid': valid,
+                'status': user['status'],
+                'role': user['role'],
+                'password_until': user['password_until'],
+                'website_allowed': website_allowed(user, settings),
+            }
+
     @app.get('/v1/health', include_in_schema=False)
     def health():
         with connect(settings) as db:
