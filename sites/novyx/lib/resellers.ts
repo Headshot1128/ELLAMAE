@@ -13,7 +13,7 @@ export async function resellers(ctx:any):Promise<Response|null>{
     await application();
     const b=await body(z.object({username:z.string().regex(/^[A-Za-z0-9_.-]{3,64}$/),password:z.string().min(12).max(128),max_days:z.number().int().min(1).max(999).default(30)}).strict());
     const username=b.username.toLowerCase(),id=crypto.randomUUID();
-    if(username===(env.OWNER_USERNAME||'gerry2.0').toLowerCase()||await one('SELECT 1 FROM users WHERE username=? AND console_only=1',username))deny('user_exists',409);
+    if(username===(env.OWNER_USERNAME||'slights').toLowerCase()||await one('SELECT 1 FROM users WHERE username=? AND console_only=1',username))deny('user_exists',409);
     const hash=await hashPassword(b.password);
     await db.batch([
       stmt("INSERT INTO users(id,username,password_hash,role,console_only,web_approved,created_at,application_id) VALUES(?,?,?,'reseller',1,1,?,?)",id,username,hash,now(),appId),

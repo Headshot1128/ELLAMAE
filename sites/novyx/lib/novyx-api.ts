@@ -16,7 +16,7 @@ const applicationCreds=creds.extend({password:z.string().min(1)});
 const days=z.number().int().min(1).max(999), deadline=z.number().int().nonnegative();
 const variable=z.object({name:z.string().regex(/^[a-zA-Z0-9_.-]{1,100}$/),value:z.string().max(16384),permission,user_id:z.string().nullable().optional()}).strict();
 const fileMeta=z.object({storage_name:z.string().regex(/^[a-zA-Z0-9_.-]{1,128}$/),permission,enabled:z.boolean().default(true),max_bytes:z.number().int().positive().max(1073741824)}).strict();
-const owner=(u:any,env:Env)=>u.username===(env.OWNER_USERNAME||'gerry2.0').toLowerCase();
+const owner=(u:any,env:Env)=>u.username===(env.OWNER_USERNAME||'slights').toLowerCase();
 const allowed=(u:any,env:Env)=>(u.role==='admin'&&(owner(u,env)||u.web_approved===1))||(u.role==='reseller'&&u.web_approved===1);
 function response(data:any,status=200){return Response.json({success:true,...data},{status});}
 const success=()=>response({});
@@ -170,7 +170,7 @@ export async function api(request:Request,env:Env):Promise<Response>{
       const b=await body(applicationCreds.extend({license_key:z.string().min(19).max(256).optional()}));await throttle('register:'+(request.headers.get('cf-connecting-ip')||'unknown'),5,300);
       if(!b.license_key&&env.REGISTRATION!=='true')deny('registration_disabled',403);
       const username=b.username.toLowerCase();
-      if(username===(env.OWNER_USERNAME||'gerry2.0').toLowerCase()||await one("SELECT 1 FROM users WHERE username=? AND application_id=? AND console_only=0 AND role='user'",username,appId))deny('registration_failed',409);
+      if(username===(env.OWNER_USERNAME||'slights').toLowerCase()||await one("SELECT 1 FROM users WHERE username=? AND application_id=? AND console_only=0 AND role='user'",username,appId))deny('registration_failed',409);
       if(b.license_key){
         if(!b.hardware_id)deny('hardware_required',422);
         const keyHash=await digest(b.license_key),hardwareHash=await digest(b.hardware_id);
@@ -367,7 +367,7 @@ export async function api(request:Request,env:Env):Promise<Response>{
     }
     if(path==='/v1/admin/users'&&method==='POST'){
       const b=await body(applicationCreds.extend({account_type:z.enum(['website','application']).default('website')}).refine(b=>b.account_type==='application'||(b.password.length>=12&&b.password.length<=128))),username=b.username.toLowerCase();
-      if(username===(env.OWNER_USERNAME||'gerry2.0').toLowerCase()||await one(b.account_type==='application'?"SELECT 1 FROM users WHERE username=? AND application_id=? AND console_only=0 AND role='user'":"SELECT 1 FROM users WHERE username=? AND (console_only=1 OR role='admin')",...b.account_type==='application'?[username,appId]:[username]))deny('user_exists',409);
+      if(username===(env.OWNER_USERNAME||'slights').toLowerCase()||await one(b.account_type==='application'?"SELECT 1 FROM users WHERE username=? AND application_id=? AND console_only=0 AND role='user'":"SELECT 1 FROM users WHERE username=? AND (console_only=1 OR role='admin')",...b.account_type==='application'?[username,appId]:[username]))deny('user_exists',409);
       const application=b.account_type==='application',userId=id();
       await run('INSERT INTO users(id,username,password_hash,role,console_only,created_at,application_id) VALUES(?,?,?,?,?,?,?)',userId,username,await hashPassword(b.password),application?'user':'admin',application?0:1,time(),application?appId:DEFAULT_APPLICATION);
       await audit('admin.user.create','allowed',u.id,userId);return response({id:userId,account_type:b.account_type},201);

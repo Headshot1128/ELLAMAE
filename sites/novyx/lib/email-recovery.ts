@@ -21,7 +21,7 @@ export async function emailRecovery(ctx:any):Promise<Response|null>{
   const {path,method,env,one,run,stmt,db,body,deny,response,authenticated,throttle,audit,owner}=ctx;
   const now=()=>Math.floor(Date.now()/1000);
   const accessCondition="status='active' AND role='admin' AND (username=? OR web_approved=1)";
-  const ownerName=(env.OWNER_USERNAME||'gerry2.0').toLowerCase();
+  const ownerName=(env.OWNER_USERNAME||'slights').toLowerCase();
   const eligible=(u:any)=>u&&u.status==='active'&&u.role==='admin'&&(owner(u,env)||u.web_approved===1);
   const generic=()=>response({message:'If an eligible website account uses that verified email, a reset link will arrive shortly.'});
   const requireMail=()=>{if(!emailReady(env))deny('email_not_configured',503);};
