@@ -94,7 +94,10 @@ int main(int argc, char** argv) {
         std::cerr << "Username and password are required; Register key also requires a license key.\n";
         return 1;
     }
-    if (hardware.size() < 16 || hardware.size() > 256) { std::cerr << "Could not identify this computer's hardware ID.\n"; return 1; }
+    if (hardware.size() < 10 || hardware.size() > 256 || hardware.rfind("S-", 0) != 0) {
+        std::cerr << "Could not read a valid Windows SID for this account. Run as a normal user (not SYSTEM).\n";
+        return 1;
+    }
     const char* ca = std::getenv("AUTH_CA_BUNDLE");
 #ifdef NOVYX_DLL_CLIENT
     secureauth::Client auth(server, hardware, ca ? ca : "", Environment("AUTH_APPLICATION_ID"));

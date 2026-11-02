@@ -242,7 +242,10 @@ def create_app(settings=None):
         content_length = request.headers.get('content-length')
         if content_length:
             try:
-                if int(content_length) > 32768:
+                # File uploads and raw binary storage allow up to 64 MiB (67108864 bytes)
+                is_file_upload = request.url.path.startswith('/v1/admin/files') or request.url.path.startswith('/v1/admin/storage')
+                limit = 67108864 if is_file_upload else 32768
+                if int(content_length) > limit:
                     return JSONResponse({'success': False, 'error': 'request_too_large'}, status_code=413)
             except ValueError:
                 pass
@@ -669,6 +672,68 @@ def create_app(settings=None):
             rows = db.execute('SELECT * FROM files ORDER BY id LIMIT 100 OFFSET ?', (max(0, offset),)).fetchall()
             audit(db, 'admin.files.list', 'allowed', admin['id'])
             return {'success': True, 'files': [dict(r) for r in rows]}
+
+    @app.post('/v1/admin/files', status_code=201)
+    async def upload_direct_file(request: Request):
+        with connect(settings) as db:
+            admin = authenticated(db, request, 'admin')
+            content = await request.body()
+            if not content or len(content) > 67108864:
+                deny('invalid_request', 422)
+            root = Path(settings.storage).resolve()
+            root.mkdir(parents=True, exist_ok=True)
+            file_id = uid()
+            storage_name = f"{file_id}.bin"
+            path = (root / storage_name).resolve()
+            path.write_bytes(content)
+            
+            db.execute('INSERT INTO files(id, storage_name, permission, enabled, max_bytes) VALUES(?,?,?,?,?)',
+                       (file_id, storage_name, 'premium', 1, len(content)))
+            audit(db, 'admin.file.upload', 'allowed', admin['id'], file_id)
+            return {
+                'success': True,
+                'id': file_id,
+                'storage_name': storage_name,
+                'permission': 'premium',
+                'enabled': 1,
+                'max_bytes': len(content)
+            }
+
+    @app.put('/v1/admin/storage/{storage_name}')
+    async def upload_raw_storage(storage_name: str, request: Request):
+        with connect(settings) as db:
+            admin = authenticated(db, request, 'admin')
+            import re
+            if not re.match(r'^[a-zA-Z0-9_.-]{1,128}$', storage_name):
+                deny('invalid_request', 422)
+            content = await request.body()
+            if not content or len(content) > 67108864:
+                deny('invalid_request', 422)
+            root = Path(settings.storage).resolve()
+            root.mkdir(parents=True, exist_ok=True)
+            path = (root / storage_name).resolve()
+            if path.parent != root:
+                deny('invalid_request', 400)
+            path.write_bytes(content)
+            audit(db, 'admin.storage.upload', 'allowed', admin['id'], storage_name)
+            return {'success': True, 'storage_name': storage_name, 'bytes': len(content)}
+
+    @app.delete('/v1/admin/files/{file_id}')
+    def delete_file(file_id: str, request: Request):
+        with connect(settings) as db:
+            admin = authenticated(db, request, 'admin')
+            row = db.execute('SELECT * FROM files WHERE id=?', (file_id,)).fetchone()
+            if row:
+                root = Path(settings.storage).resolve()
+                path = (root / row['storage_name']).resolve()
+                if path.parent == root and path.is_file():
+                    try:
+                        path.unlink()
+                    except Exception:
+                        pass
+                db.execute('DELETE FROM files WHERE id=?', (file_id,))
+                audit(db, 'admin.file.delete', 'allowed', admin['id'], file_id)
+            return {'success': True}
 
     @app.get('/v1/admin/users/{user_id}/permissions')
     def list_permissions(user_id: str, request: Request):

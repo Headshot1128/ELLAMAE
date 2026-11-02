@@ -23,21 +23,25 @@ HttpResponse token() {
         {"access_token", std::string(43, 'a')}, {"refresh_token", std::string(64, 'b')},
         {"expires_at", 9999999999LL}}).dump()};
 }
+
+// Synthetic SID used for all unit tests — must pass the S-\d+-\d+... format check.
+static const std::string kTestSid = "S-1-5-21-1000000001-1000000001-1000000001-500";
+
 int main() {
     {
         auto scoped = std::make_shared<Fake>();
         const std::string app = "00000000-0000-4000-8000-000000000002";
-        Client application("https://auth.example.test","",scoped,app);
-        check(application.Initialize());check(!application.SelectApplication(app));
+        Client application("https://auth.example.test", kTestSid, scoped, app);
+        check(application.Initialize()); check(!application.SelectApplication(app));
         scoped->replies.push_back(token()); // Old servers cannot silently use the default app.
         check(application.Login("user","password").error == Error::InvalidResponse);
         check(scoped->last_url == "https://auth.example.test/v1/login?application_id="+app);
         auto reply=token();auto body=nlohmann::json::parse(reply.body);body["application_id"]=app;reply.body=body.dump();
         scoped->replies.push_back(reply);check(application.Login("user","password").success);
-        Client bad("https://auth.example.test","",scoped,"bad\r\napplication");check(!bad.Initialize());
+        Client bad("https://auth.example.test", kTestSid, scoped,"bad\r\napplication");check(!bad.Initialize());
     }
     auto fake = std::make_shared<Fake>();
-    Client client("https://auth.example.test", "", fake);
+    Client client("https://auth.example.test", kTestSid, fake);
     check(!client.Login("user", "password").success);
     check(client.Initialize());
     check(!client.DownloadFile("file").success && fake->calls == 0);
@@ -93,10 +97,10 @@ int main() {
     check(!download.success && download.bytes.empty());
     check(client.GetState() == State::Unauthenticated);
     // Exercise the actual curl transport: unreachable loopback TLS endpoint must fail closed.
-    Client offline("https://127.0.0.1:1");
+    Client offline("https://127.0.0.1:1", kTestSid);
     check(offline.Initialize());
     check(offline.Login("user", "wrong password").error == Error::NetworkFailure);
     check(!offline.DownloadFile("file").success);
-    Client insecure("http://localhost"); check(!insecure.Initialize());
+    Client insecure("http://localhost", kTestSid); check(!insecure.Initialize());
     std::cout << "SDK failure and state tests passed\n";
 }

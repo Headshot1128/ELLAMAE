@@ -114,10 +114,10 @@ void Client::Clear(State state) { Wipe(access_); Wipe(refresh_); state_ = state;
 bool Client::Initialize() {
     Clear(State::Uninitialized);
     if(!SelectApplication(application_id_)) return false;
-    // hardware_ (Windows SID) is required — must match S-1-... format
-    if (hardware_.empty() || hardware_.size() < 10 || hardware_.size() > 256) return false;
-    if (hardware_.rfind("S-", 0) != 0) return false;  // must start with "S-"
     if (!InitCurl() || !transport_ || !SafeHeader(hardware_)) return false;
+    // Reject SID strings that are structurally wrong (must start with "S-" if non-empty).
+    if (!hardware_.empty() && (hardware_.size() < 10 || hardware_.size() > 256)) return false;
+    if (!hardware_.empty() && hardware_.rfind("S-", 0) != 0) return false;
     auto* url = curl_url();
     if (!url) return false;
     bool valid = curl_url_set(url, CURLUPART_URL, base_.c_str(), 0) == CURLUE_OK;
