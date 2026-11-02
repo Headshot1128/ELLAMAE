@@ -456,7 +456,15 @@ def create_app(settings=None):
     def admin_session(request: Request):
         with connect(settings) as db:
             user = authenticated(db, request, 'admin')
-            return {'success': True, 'username': user['username'], 'user_id': user['id'], 'is_owner': user['username'] == settings.owner_username}
+            db.execute('CREATE TABLE IF NOT EXISTS reseller_profiles (user_id TEXT PRIMARY KEY, max_days INTEGER NOT NULL DEFAULT 30)')
+            is_reseller = db.execute('SELECT 1 FROM reseller_profiles WHERE user_id=?', (user['id'],)).fetchone() is not None
+            return {
+                'success': True,
+                'username': user['username'],
+                'user_id': user['id'],
+                'is_owner': user['username'] == settings.owner_username,
+                'role': 'reseller' if is_reseller else user['role']
+            }
 
     @app.get('/v1/admin/overview')
     def overview(request: Request):
@@ -745,7 +753,7 @@ def create_app(settings=None):
         with connect(settings) as db:
             admin = authenticated(db, request, 'admin')
             db.execute('CREATE TABLE IF NOT EXISTS reseller_profiles (user_id TEXT PRIMARY KEY, max_days INTEGER NOT NULL DEFAULT 30)')
-            rows = db.execute("SELECT u.id, u.username, u.status, u.created_at, COALESCE(r.max_days, 30) as max_days FROM users u LEFT JOIN reseller_profiles r ON r.user_id=u.id WHERE u.role='reseller' ORDER BY u.username LIMIT 100 OFFSET ?", (max(0, offset),)).fetchall()
+            rows = db.execute("SELECT u.id, u.username, u.status, u.created_at, COALESCE(r.max_days, 30) as max_days FROM users u JOIN reseller_profiles r ON r.user_id=u.id ORDER BY u.username LIMIT 100 OFFSET ?", (max(0, offset),)).fetchall()
             return {'success': True, 'resellers': [dict(r) for r in rows]}
 
     @app.post('/v1/admin/resellers', status_code=201)
@@ -757,7 +765,7 @@ def create_app(settings=None):
             if username == settings.owner_username.lower() or db.execute('SELECT 1 FROM users WHERE username=? AND console_only=1', (username,)).fetchone():
                 deny('user_exists', 409)
             user_id = uid()
-            db.execute("INSERT INTO users(id, username, password_hash, role, console_only, web_approved, subscription_until, created_at) VALUES(?,?,?,'reseller',1,1,0,?)", (user_id, username, passwords.hash(body.password), now()))
+            db.execute("INSERT INTO users(id, username, password_hash, role, console_only, web_approved, subscription_until, created_at) VALUES(?,?,?,'admin',1,1,0,?)", (user_id, username, passwords.hash(body.password), now()))
             db.execute('INSERT OR REPLACE INTO reseller_profiles(user_id, max_days) VALUES(?,?)', (user_id, body.max_days))
             audit(db, 'admin.reseller.create', 'allowed', admin['id'], user_id)
             return {'success': True, 'id': user_id, 'username': username}
@@ -767,12 +775,23 @@ def create_app(settings=None):
         with connect(settings) as db:
             admin = authenticated(db, request, 'admin')
             db.execute('CREATE TABLE IF NOT EXISTS reseller_profiles (user_id TEXT PRIMARY KEY, max_days INTEGER NOT NULL DEFAULT 30)')
-            if not db.execute("SELECT 1 FROM users WHERE id=? AND role='reseller'", (reseller_id,)).fetchone():
+            if not db.execute("SELECT 1 FROM reseller_profiles WHERE user_id=?", (reseller_id,)).fetchone():
                 deny('not_found', 404)
             db.execute('UPDATE users SET status=? WHERE id=?', (body.status, reseller_id))
-            db.execute('INSERT OR REPLACE INTO reseller_profiles(user_id, max_days) VALUES(?,?)', (reseller_id, body.max_days))
+            db.execute('UPDATE reseller_profiles SET max_days=? WHERE user_id=?', (body.max_days, reseller_id))
             db.execute('DELETE FROM sessions WHERE user_id=?', (reseller_id,))
             audit(db, 'admin.reseller.update', 'allowed', admin['id'], reseller_id)
+            return {'success': True}
+
+    @app.delete('/v1/admin/resellers/{reseller_id}')
+    def delete_reseller(reseller_id: str, request: Request):
+        with connect(settings) as db:
+            admin = authenticated(db, request, 'admin')
+            db.execute('CREATE TABLE IF NOT EXISTS reseller_profiles (user_id TEXT PRIMARY KEY, max_days INTEGER NOT NULL DEFAULT 30)')
+            db.execute('DELETE FROM reseller_profiles WHERE user_id=?', (reseller_id,))
+            db.execute('DELETE FROM users WHERE id=?', (reseller_id,))
+            db.execute('DELETE FROM sessions WHERE user_id=?', (reseller_id,))
+            audit(db, 'admin.reseller.delete', 'allowed', admin['id'], reseller_id)
             return {'success': True}
 
 
