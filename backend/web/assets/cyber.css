@@ -67,11 +67,26 @@ body {
   background: rgba(255, 255, 255, 0.22);
 }
 
+/* Ensure hidden attribute is always strictly respected across all views */
+[hidden],
+#login-screen[hidden],
+#console[hidden],
+.login-screen[hidden],
+.console[hidden],
+#page-error[hidden],
+#login-error[hidden],
+#modal-error[hidden],
+#toast[hidden],
+#table-empty[hidden],
+#table-data[hidden] {
+  display: none !important;
+}
+
 /* ==========================================================================
    LOGIN SCREEN (Cybernetic Portal)
    ========================================================================== */
-.login-screen.login-simple,
-[data-theme=dark] .login-screen.login-simple {
+.login-screen.login-simple:not([hidden]),
+[data-theme=dark] .login-screen.login-simple:not([hidden]) {
   background: transparent !important;
   display: flex !important;
   align-items: center !important;
