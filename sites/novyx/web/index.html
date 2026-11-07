@@ -15,6 +15,7 @@
   <script src="/assets/app.js" type="module"></script>
   <link rel="stylesheet" href="/assets/refinement.css">
   <link rel="stylesheet" href="/assets/interface.css">
+  <link rel="stylesheet" href="/assets/cyber.css">
 </head>
 <body>
   <section id="login-screen" class="login-screen login-simple" aria-label="Sign in to NOVYX">
@@ -30,7 +31,7 @@
           <div class="password-label"><label for="password">Password</label><button id="forgot-password" class="forgot-password-link" type="button">Forgot password?</button></div>
           <div class="password-wrap"><input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required><button id="toggle-password" class="password-toggle" type="button" aria-label="Show password">Show</button></div>
           <p id="login-error" class="form-error" role="alert" hidden></p>
-          <label class="remember-choice" for="remember-session"><input id="remember-session" name="remember" type="checkbox"> <span>Stay signed in</span></label>
+          <label class="remember-choice" for="remember-session"><input id="remember-session" name="remember" type="checkbox" checked> <span>Stay signed in</span></label>
           <button class="button primary login-submit" type="submit">Sign in</button>
         </form>
         <p class="login-trust"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3-8 3v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z"/><path d="m8 12 3 3 5-6"/></svg> Your workspace. Secure by design.</p>

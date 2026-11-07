@@ -83,6 +83,7 @@ class ApiError extends Error {
   constructor(code, status = 0) { super(messages[code] || `Request failed (${status || code}).`); this.code = code; this.status = status; }
 }
 let isOwner = false, isReseller = false, resellerMaxDays = 30, resellerRevision = 0;
+const REMEMBER_KEY = 'novyx_saved_session_v1';
 let rememberedSession = false;
 let access = '', refreshToken = '', expiry = 0, epoch = 0, currentView = 'overview', offset = 0;
 let records = [], ticket = 0, refreshTimer, toastTimer, pageController;
@@ -93,6 +94,7 @@ const requests = createSessionRequests({
 });
 
 function signedOut(message = '') {
+  try { localStorage.removeItem(REMEMBER_KEY); } catch {}
   rememberedSession = false;
   access = ''; refreshToken = ''; expiry = 0; isOwner = false; isReseller = false; epoch++; ticket++;
   pageController?.abort(); pageCache.clear(); requests.reset(); records = [];
@@ -140,10 +142,20 @@ function acceptTokens(data) {
   access = data.access_token; refreshToken = data.refresh_token; expiry = data.expires_at;
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(() => { api('/v1/admin/session').catch(() => {}); }, Math.max(1000, (expiry*1000 - Date.now()) - 10000));
+  if (rememberedSession) {
+    try {
+      const existing = JSON.parse(localStorage.getItem(REMEMBER_KEY) || '{}');
+      localStorage.setItem(REMEMBER_KEY, JSON.stringify({
+        ...existing,
+        refresh_token: data.refresh_token,
+        time: Date.now()
+      }));
+    } catch {}
+  }
 }
 async function rotate(expectedEpoch) {
   if (expectedEpoch !== epoch || !refreshToken) throw new ApiError('authentication_required', 401);
-  const data = rememberedSession ? await wire('/v1/admin/resume','POST',{}) : await wire('/v1/refresh', 'POST', { refresh_token:refreshToken });
+  const data = await wire('/v1/refresh', 'POST', { refresh_token:refreshToken });
   if (expectedEpoch !== epoch) throw new ApiError('authentication_required',401);
   acceptTokens(data);
 }
@@ -198,10 +210,10 @@ function rowMarkup(row) {
   if (currentView === 'resellers') cells=[`<div class="user-cell"><span class="avatar">${esc(row.username[0].toUpperCase())}</span><div><strong>${esc(row.username)}</strong><span class="cell-subtitle">Reseller account</span></div></div>`,badge(row.status,row.status==='active'?'':'warn'),`${esc(row.max_days)} days`,esc(stamp(row.created_at)),actions([['edit-reseller','Manage']])];
   else if(currentView==='reseller_licenses')cells=[`<strong class="license-key">${esc(row.key||'Unavailable')}</strong><span class="cell-subtitle">SID binding enabled</span>`,esc(row.username||'Ready to assign'),esc(stamp(row.expires_at)),badge(row.revoked?'Revoked':row.expires_at<=Date.now()/1000?'Expired':'Active',row.revoked?'bad':''),actions([['copy-license','Copy key']])];
   else if (currentView === 'applications') cells = [
-    `<strong>${esc(row.name)}</strong>`, `<code class=code-pill>${esc(row.id)}</code>`,badge(row.status,row.status==='active'?'':'warn'),actions([['copy-application','Copy ID'],['edit-application','Manage']])];
+    `<strong>${esc(row.name)}</strong>`, `<code class=code-pill>${esc(row.id)}</code>`,badge(row.status,row.status==='active'?'':'warn'),actions([['copy-application','Copy ID'],['edit-application','Manage'],...(row.id!=='00000000-0000-4000-8000-000000000001'?[['delete-application','Delete']]:[])])];
   else if (currentView === 'users') cells = [
     `<strong>${esc(row.username)}</strong>`,
-    row.licenses?.length?row.licenses.map(license=>`<div><strong class=license-key>${esc(license.key||'Legacy key unavailable')}</strong><span class=cell-subtitle>${esc(license.revoked?'Revoked':license.expires_at<=Date.now()/1000?'Expired':'Active')} ? ${esc(stamp(license.expires_at))}</span></div>`).join(''):badge('No key registered','neutral'),
+    row.licenses?.length?row.licenses.map(license=>`<div><strong class=license-key>${esc(license.key || (license.id ? 'LIC-' + shortId(license.id).toUpperCase() : 'Active key'))}</strong><span class=cell-subtitle>${esc(license.revoked?'Revoked':license.expires_at<=Date.now()/1000?'Expired':'Active')} &bull; ${esc(stamp(license.expires_at))}</span></div>`).join(''):badge('No key registered','neutral'),
     badge(row.status==='suspended'?'Banned':row.status,row.status==='active'?'':'bad'),badge(row.hwid_bound?'Bound':'Not bound','neutral'),esc(stamp(row.subscription_until)),
     actions([['edit','Manage'],['reset-user-hwid','Reset HWID'],[row.status==='active'?'ban-user':'unban-user',row.status==='active'?'Ban':'Unban'],['delete-user','Delete user']]) ];
   else if (currentView === 'website_users') cells = [
@@ -209,16 +221,16 @@ function rowMarkup(row) {
     badge(row.status==='suspended'&&!row.console_only?'Banned':row.status, row.status === 'active' ? '' : 'bad'), row.is_owner ? badge('Owner') : !row.console_only && row.role !== 'admin' ? badge('EXE only','neutral') : row.web_approved ? badge('Approved') : badge('Not approved','warn'), badge(row.is_owner ? 'owner' : row.console_only ? 'website user' : 'application (EXE)','neutral'),
     actions([['edit','Manage'],...(row.console_only || row.role === 'admin' ? [['permissions','Website access']] : []),['delete-user','Delete user'],...(!row.console_only&&row.role!=='admin'?[['reset-user-hwid','Reset HWID'],[row.status==='active'?'ban-user':'unban-user',row.status==='active'?'Ban':'Unban']]:[])]) ];
   else if (currentView === 'licenses') cells = [
-    `<strong class="license-key">${esc(row.key || 'Legacy key unavailable')}</strong><span class="cell-subtitle">${row.hardware_bound ? 'Hardware bound' : 'Account license'} · ${esc(shortId(row.id))}</span>`,
+    `<strong class="license-key">${esc(row.key || (row.username ? 'Bound (' + row.username + ')' : 'Legacy (' + shortId(row.id) + ')'))}</strong><span class="cell-subtitle">${row.hardware_bound ? 'Hardware bound' : 'Account license'} &bull; ${esc(shortId(row.id))}</span>`,
     `<code class="code-pill">${esc(row.permission)}</code>`, esc(row.username || 'Unassigned'), esc(row.frozen_at != null ? 'Frozen' : stamp(row.expires_at)),
-    row.revoked ? badge('Revoked','bad') : row.frozen_at != null ? badge('Frozen','warn') : row.expires_at <= Date.now()/1000 ? badge('Expired','warn') : badge('Active'), row.revoked ? '—' : actions([...(row.hardware_bound ? [['reset-hwid','HWID Reset']] : []),['freeze',row.frozen_at != null ? 'Unfreeze' : 'Freeze'],['extend','Add days'],['revoke','Revoke']]) ];
+    row.revoked ? badge('Revoked','bad') : row.frozen_at != null ? badge('Frozen','warn') : row.expires_at <= Date.now()/1000 ? badge('Expired','warn') : badge('Active'), row.revoked ? '&mdash;' : actions([...(row.hardware_bound ? [['reset-hwid','HWID Reset']] : []),['freeze',row.frozen_at != null ? 'Unfreeze' : 'Freeze'],['extend','Add days'],['revoke','Revoke']]) ];
   else if (currentView === 'variables') cells = [
     `<strong>${esc(row.name)}</strong><span class="cell-subtitle">${esc(row.id)}</span>`, esc(row.value.length > 45 ? row.value.slice(0,45)+'…' : row.value),
     row.user_id ? `<span title="${esc(row.user_id)}">User ${esc(shortId(row.user_id))}</span>` : badge('Application','neutral'),
     `<code class="code-pill">${esc(row.permission)}</code>`, actions([['edit','Edit'],['delete','Delete']]) ];
   else if (currentView === 'files') cells = [
     `<strong>${esc(row.id)}</strong>`, `<code class="code-pill">${esc(row.storage_name)}</code>`, `<code class="code-pill">${esc(row.permission)}</code>`,
-    `${esc((row.max_bytes/1048576).toLocaleString(undefined,{maximumFractionDigits:2}))} MiB`, badge(row.enabled ? 'Enabled' : 'Disabled',row.enabled ? '' : 'neutral'), actions([['download-code','C++ download'],['edit','Manage']]) ];
+    `${esc((row.max_bytes/1048576).toLocaleString(undefined,{maximumFractionDigits:2}))} MiB`, badge(row.enabled ? 'Enabled' : 'Disabled',row.enabled ? '' : 'neutral'), actions([['download-code','C++ download'],['edit','Manage'],['delete-file','Delete']]) ];
   else cells = [ `<strong>${esc(eventName(row.event))}</strong><span class="cell-subtitle">#${esc(row.id)}</span>`, outcome(row.outcome), `<span title="${esc(row.actor_id)}">${esc(shortId(row.actor_id))}</span>`, `<span title="${esc(row.target)}">${esc(shortId(row.target))}</span>`, esc(stamp(row.timestamp)) ];
   return `<tr>${cells.map((value) => `<td>${value}</td>`).join('')}</tr>`;
 }
@@ -409,7 +421,7 @@ function field(name, label, type = 'text', value = '', options = {}) {
   if (type === 'select') control = `<select name="${name}" id="field-${name}">${options.choices.map(([v,l]) => `<option value="${esc(v)}" ${String(value) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
   else if (type === 'textarea') control = `<textarea id="field-${name}" name="${name}" maxlength="16384"${required}>${esc(value)}</textarea>`;
   else if (type === 'checkbox') return `<div class="field"><label class="checkbox-label"><input name="${name}" type="checkbox" ${value ? 'checked' : ''}>${label}</label>${options.help ? `<small>${options.help}</small>` : ''}</div>`;
-  else control = `<input id="field-${name}" name="${name}" type="${type}" value="${type === 'password' ? '' : esc(value)}"${required}${type === 'password' ? ' minlength="12" maxlength="128" autocomplete="new-password"' : ''}${type === 'number' ? ` min="1" max="${options.numberMax || 1073741824}" step="1"` : ''}${options.pattern ? ` pattern="${options.pattern.replace(/-\]/g,'\\-]')}"` : ''}${options.max ? ` maxlength="${options.max}"` : ''}>`;
+  else control = `<input id="field-${name}" name="${name}" type="${type}" value="${type === 'password' ? '' : esc(value)}"${required}${type === 'password' ? ' minlength="1" maxlength="128" autocomplete="new-password"' : ''}${type === 'number' ? ` min="1" max="${options.numberMax || 1073741824}" step="1"` : ''}${options.pattern ? ` pattern="${options.pattern.replace(/-\]/g,'\\-]')}"` : ''}${options.max ? ` maxlength="${options.max}"` : ''}>`;
   return `<div class="field"><label for="field-${name}">${label}</label>${control}${options.help ? `<small>${options.help}</small>` : ''}</div>`;
 }
 function openModal(title, description, fields, label, submit) {
@@ -454,7 +466,7 @@ function createUser() {
     $('#modal [name=max_days]').disabled=!reseller;
     $('#modal-form [type=submit]').textContent=reseller?'Create reseller':'Create user';
     if (type.value === 'application') { password.removeAttribute('minlength'); password.removeAttribute('maxlength'); }
-    else { password.minLength = 12; password.maxLength = 128; }
+    else { password.minLength = 1; password.maxLength = 128; }
   };
   type.addEventListener('change',syncPasswordRule);syncPasswordRule();
 }
@@ -485,17 +497,16 @@ function managePermissions(row) {
 
 function createLicense() {
   const applicationId = activeApplication, applicationName = applications.find(app=>app.id===applicationId)?.name || 'Application';
-  openModal('Create a license',`Create a key for ${applicationName}. Keys work only in this application.`,
-    field('days','License duration (days)','number',30,{numberMax:999,help:'Enter 1–999 days. The key automatically expires this many days after creation.'})+
-    field('hardware','Require hardware binding','checkbox',false,{help:'An optional anti-abuse measure. Hardware IDs can be spoofed.'}),'Create license',async (form) => {
+  openModal('Create a license',`Create a key for ${applicationName}. Keys work only in this application. All keys are SID-locked to the first machine that activates them.`,
+    field('days','License duration (days)','number',30,{numberMax:999,help:'Enter 1–999 days. The key automatically expires this many days after creation.'}),'Create license',async (form) => {
       const days = Number(form.get('days'));
       if (!Number.isInteger(days) || days < 1 || days > 999) throw new Error('Enter a whole number from 1 to 999 days.');
       if (activeApplication !== applicationId) throw new Error('The selected application changed. Open Create license again.');
-      const data = await requests.request('/v1/admin/licenses?application_id='+encodeURIComponent(applicationId),'POST',{days,hardware_bound:form.get('hardware') === 'on'});
+      const data = await requests.request('/v1/admin/licenses?application_id='+encodeURIComponent(applicationId),'POST',{days});
       if (activeApplication !== applicationId) return;
       await loadPage('licenses',true);
       if (activeApplication !== applicationId) return;
-      openModal('Your license is ready',`Application: ${applicationName}. This key is at the top of its license list.`,`<div class="secret-key" id="new-license-key">${esc(data.key)}</div><p>Deliver it privately to its intended user. Activation binds the key to one account.</p>`, 'Done', async () => { $('#modal').close(); $('#modal-content').replaceChildren(); });
+      openModal('Your license is ready',`Application: ${applicationName}. This key is SID-locked — the first machine to activate it claims it permanently.`,`<div class="secret-key" id="new-license-key">${esc(data.key)}</div><p>Deliver it privately to its intended user. Activation binds the key to one Windows SID.</p>`, 'Done', async () => { $('#modal').close(); $('#modal-content').replaceChildren(); });
     });
 }
 function editVariable(row) {
@@ -637,22 +648,62 @@ $('#login-form').addEventListener('submit', async (event) => {
   button.textContent = 'Signing in…'; $('#login-form').setAttribute('aria-busy','true');
   $('#login-error').hidden = true;
   const username = $('#username').value.trim(); const password = $('#password').value;
-  const remember = $('#remember-session').checked;
+  const remember = $('#remember-session') ? $('#remember-session').checked : true;
   $('#password').value = '';
   try {
     signedOut();
     const data = await wire('/v1/admin/login','POST',{username,password,remember});
-    rememberedSession=remember;
+    rememberedSession = remember;
+    if (remember && data.refresh_token) {
+      try {
+        localStorage.setItem(REMEMBER_KEY, JSON.stringify({
+          refresh_token: data.refresh_token,
+          username: username,
+          time: Date.now()
+        }));
+      } catch {}
+    } else {
+      try { localStorage.removeItem(REMEMBER_KEY); } catch {}
+    }
     await finishSignIn(data);
   } catch (error) { signedOut(error.message); }
   finally { button.disabled = false; button.textContent = buttonLabel; $('#login-form').removeAttribute('aria-busy'); }
 });
 async function restoreSignIn(){
-  if(openedRecoveryLink)return;
-  const button=$('#login-form [type=submit]');button.disabled=true;button.textContent='Checking session...';
-  try{const data=await wire('/v1/admin/resume','POST',{});rememberedSession=true;await finishSignIn(data);}
-  catch{if(access)signedOut();}
-  finally{button.disabled=false;button.textContent='Sign in';}
+  if(openedRecoveryLink) return;
+  let saved = null;
+  try {
+    const raw = localStorage.getItem(REMEMBER_KEY);
+    if (raw) saved = JSON.parse(raw);
+  } catch {}
+  const rem = $('#remember-session');
+  if (rem) rem.checked = true;
+  if (!saved || !saved.refresh_token) return;
+
+  const button = $('#login-form [type=submit]');
+  const prevLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Restoring session…';
+  try {
+    const data = await wire('/v1/refresh', 'POST', { refresh_token: saved.refresh_token });
+    rememberedSession = true;
+    if (data.refresh_token) {
+      try {
+        localStorage.setItem(REMEMBER_KEY, JSON.stringify({
+          refresh_token: data.refresh_token,
+          username: saved.username,
+          time: Date.now()
+        }));
+      } catch {}
+    }
+    await finishSignIn(data);
+  } catch (err) {
+    try { localStorage.removeItem(REMEMBER_KEY); } catch {}
+    signedOut();
+  } finally {
+    button.disabled = false;
+    button.textContent = prevLabel || 'Sign in';
+  }
 }
 restoreSignIn();
 $('#toggle-password').addEventListener('click', () => {
@@ -696,6 +747,12 @@ document.addEventListener('click',async (event) => {
   else if (action === 'permissions') managePermissions(row);
   else if (action === 'extend') extendLicense(row);
   else if (action === 'delete-user') confirmAction(`Delete ${row.username}?`,'This permanently deletes the account and personal variables, ends all its sessions, and revokes its assigned licenses.',() => api(`/v1/admin/users/${id}`,'DELETE'));
+  else if (action === 'delete-application') confirmAction(`Delete ${row.name}?`,'This permanently removes this application, its customer accounts, and associated licenses.',async () => {
+    await api(`/v1/admin/applications/${id}`,'DELETE');
+    pageCache.clear();
+    await loadApplications(DEFAULT_APPLICATION);
+  });
+  else if (action === 'delete-file') confirmAction(`Delete file ${shortId(row.id)}?`,'This permanently deletes this protected file from hosted storage and makes it unavailable for download.',() => api(`/v1/admin/files/${id}`,'DELETE'));
   else if (action === 'reset-hwid') confirmAction('Reset hardware binding?','The assigned account keeps this license. Its application sessions will be signed out, and the next activation can bind a new device.',() => api(`/v1/admin/licenses/${id}/reset-hwid`,'POST',{}));
   else if (action === 'freeze') { button.disabled = true; try { await api(`/v1/admin/licenses/${id}/freeze`,'POST'); await loadPage(); } catch(error) { toast(error.message); } finally { button.disabled = false; } }
   else if (action === 'revoke') confirmAction('Revoke and delete this license?','This permanently deletes the key from the license list. It will no longer authorize access.',() => api(`/v1/admin/licenses/${id}`,'DELETE'));

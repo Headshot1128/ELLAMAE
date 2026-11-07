@@ -347,8 +347,9 @@ def create_app(settings=None):
                 db.execute('UPDATE users SET password_hash=? WHERE id=?', (passwords.hash(body.password), user['id']))
             hw_hash_for_session = digest(body.hardware_id) if getattr(body, 'hardware_id', None) else None
             sid = uid()
+            session_seconds = 30 * 86400 if (audience == 'admin' and getattr(body, 'remember', False)) else settings.session_seconds
             db.execute('INSERT INTO sessions VALUES(?,?,?,?,0,?)',
-                       (sid, user['id'], audience, now() + settings.session_seconds, hw_hash_for_session))
+                       (sid, user['id'], audience, now() + session_seconds, hw_hash_for_session))
             audit(db, 'login', 'allowed', user['id'])
             return issue(db, settings, sid)
 
@@ -432,6 +433,8 @@ def create_app(settings=None):
                 deny('hardware_mismatch', 403)
             db.execute('UPDATE refresh_tokens SET used=1 WHERE hash=?', (digest(body.refresh_token),))
             db.execute('DELETE FROM access_tokens WHERE session_id=?', (row['id'],))
+            if row['audience'] == 'admin':
+                db.execute('UPDATE sessions SET expires_at=? WHERE id=?', (now() + 30 * 86400, row['id']))
             audit(db, 'refresh', 'allowed', row['user_id'])
             return issue(db, settings, row['id'])
 
