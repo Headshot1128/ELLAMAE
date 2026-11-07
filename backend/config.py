@@ -17,7 +17,8 @@ class Settings:
 
     @classmethod
     def environment(cls):
-        return cls(database=os.getenv('AUTH_DATABASE', 'data/auth.db'),
+        db_url = os.getenv('DATABASE_URL') or os.getenv('AUTH_DATABASE', 'data/auth.db')
+        return cls(database=db_url,
                    storage=os.getenv('AUTH_STORAGE', 'data/private'),
                    require_https=os.getenv('AUTH_REQUIRE_HTTPS', 'false').lower() == 'true',
                    registration=os.getenv('AUTH_REGISTRATION', 'false') == 'true',
@@ -26,5 +27,6 @@ class Settings:
 
 
 def prepare(settings):
-    Path(settings.database).parent.mkdir(parents=True, exist_ok=True)
+    if not settings.database.startswith(('postgres://', 'postgresql://')):
+        Path(settings.database).parent.mkdir(parents=True, exist_ok=True)
     Path(settings.storage).mkdir(parents=True, exist_ok=True)

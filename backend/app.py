@@ -182,6 +182,21 @@ def authenticated(db, request, audience='client', count_request=True):
         deny('website_approval_required', 401)
     if audience == 'client' and (row['console_only'] or row['role'] == 'admin'):
         deny('permission_denied', 403)
+    if audience == 'client':
+        app_id = (
+            request.query_params.get('application_id')
+            or request.headers.get('x-application-id')
+            or (row['application_id'] if 'application_id' in row.keys() else None)
+            or '00000000-0000-4000-8000-000000000001'
+        )
+        try:
+            app = db.execute("SELECT status FROM applications WHERE id=?", (app_id,)).fetchone()
+            if app and app['status'] != 'active':
+                deny('application_disabled', 403)
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     if row['hardware_hash'] and digest(request.headers.get('x-hardware-id', '')) != row['hardware_hash']:
         deny('hardware_mismatch', 403)
     if count_request:
@@ -289,6 +304,24 @@ def create_app(settings=None):
             if audience == 'client' and (user['console_only'] or user['role'] == 'admin'):
                 audit(db, 'login', 'denied')
                 deny('invalid_credentials')
+            # Check application status for client logins
+            if audience == 'client':
+                app_id = (
+                    request.query_params.get('application_id')
+                    or request.headers.get('x-application-id')
+                    or getattr(body, 'application_id', None)
+                    or (user['application_id'] if 'application_id' in user.keys() else None)
+                    or '00000000-0000-4000-8000-000000000001'
+                )
+                try:
+                    app = db.execute("SELECT status FROM applications WHERE id=?", (app_id,)).fetchone()
+                    if app and app['status'] != 'active':
+                        audit(db, 'login.application_disabled', 'denied', user['id'])
+                        deny('application_disabled', 403)
+                except HTTPException:
+                    raise
+                except Exception:
+                    pass
             # Enforce SID-based HWID lock for application (client) logins
             if audience == 'client':
                 hw = getattr(body, 'hardware_id', None)
@@ -994,6 +1027,13 @@ def create_app(settings=None):
             if not db.execute('SELECT 1 FROM applications WHERE id=?', (app_id,)).fetchone():
                 deny('not_found', 404)
             db.execute('UPDATE applications SET name=?, status=? WHERE id=?', (body.name, body.status, app_id))
+            if body.status != 'active':
+                try:
+                    cols = [r[1] for r in db.execute('PRAGMA table_info(users)').fetchall()]
+                    if 'application_id' in cols:
+                        db.execute("UPDATE sessions SET revoked=1 WHERE audience='client' AND user_id IN (SELECT id FROM users WHERE application_id=?)", (app_id,))
+                except Exception:
+                    pass
             audit(db, 'admin.application.update', 'allowed', admin['id'], app_id)
             return {'success': True}
 
