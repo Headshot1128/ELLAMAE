@@ -117,6 +117,7 @@ async function wire(path, method, body, token = '', binaryResponse = false, sign
     const headers = { 'Accept':binaryResponse ? 'application/vnd.novyx.asset' : 'application/json' };
     const binary = body instanceof Blob;
     if (body !== undefined) headers['Content-Type'] = binary ? 'application/octet-stream' : 'application/json';
+    if (binary && body.name) headers['X-File-Name'] = encodeURIComponent(body.name);
     if (token) headers.Authorization = `Bearer ${token}`;
     const response = await fetch(path, { method, headers, body:body === undefined ? undefined : binary ? body : JSON.stringify(body),
       cache:'no-store', credentials:'same-origin', redirect:'error', signal:controller.signal });
@@ -535,7 +536,7 @@ function editFile(row) {
         const file = form.get('upload');
         if (!(file instanceof File) || !file.name || !file.size) throw new Error('Choose a nonempty file.');
         if (file.size > 67108864) throw new Error('Choose a file no larger than 64 MiB.');
-        const data = await api('/v1/admin/files','POST',file);
+        const data = await api('/v1/admin/files?filename=' + encodeURIComponent(file.name),'POST',file);
         await changed('File uploaded.');
         showDownloadCode(data);
       });

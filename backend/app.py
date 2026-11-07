@@ -719,7 +719,7 @@ def create_app(settings=None):
             return {'success': True, 'files': [dict(r) for r in rows]}
 
     @app.post('/v1/admin/files', status_code=201)
-    async def upload_direct_file(request: Request):
+    async def upload_direct_file(request: Request, filename: str | None = None):
         with connect(settings) as db:
             admin = authenticated(db, request, 'admin')
             content = await request.body()
@@ -728,7 +728,21 @@ def create_app(settings=None):
             root = Path(settings.storage).resolve()
             root.mkdir(parents=True, exist_ok=True)
             file_id = uid()
-            storage_name = f"{file_id}.bin"
+
+            raw_name = (
+                filename
+                or request.query_params.get('filename')
+                or request.headers.get('x-file-name')
+            )
+            if raw_name:
+                import re
+                import urllib.parse
+                raw_name = urllib.parse.unquote(raw_name)
+                clean_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', Path(raw_name).name)[:128]
+                storage_name = clean_name if clean_name else f"{file_id}.bin"
+            else:
+                storage_name = f"{file_id}.bin"
+
             path = (root / storage_name).resolve()
             path.write_bytes(content)
             
