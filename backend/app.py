@@ -508,6 +508,12 @@ def create_app(settings=None):
                 raise
             root = Path(settings.storage).resolve()
             path = (root / row['storage_name']).resolve()
+            # Auto-restore from database file_data if file is missing on local disk
+            cols = [r[1] for r in db.execute('PRAGMA table_info(files)').fetchall()]
+            if not path.is_file() and 'file_data' in cols and row['file_data']:
+                root.mkdir(parents=True, exist_ok=True)
+                raw_data = bytes(row['file_data']) if isinstance(row['file_data'], (memoryview, bytes)) else row['file_data']
+                path.write_bytes(raw_data)
             if path.parent != root or not path.is_file():
                 deny('file_unavailable', 404)
             handle = path.open('rb')
@@ -705,7 +711,7 @@ def create_app(settings=None):
     def list_files(request: Request, offset: int = 0):
         with connect(settings) as db:
             admin = authenticated(db, request, 'admin')
-            rows = db.execute('SELECT * FROM files ORDER BY id LIMIT 100 OFFSET ?', (max(0, offset),)).fetchall()
+            rows = db.execute('SELECT id, storage_name, permission, enabled, max_bytes FROM files ORDER BY id LIMIT 100 OFFSET ?', (max(0, offset),)).fetchall()
             audit(db, 'admin.files.list', 'allowed', admin['id'])
             return {'success': True, 'files': [dict(r) for r in rows]}
 
@@ -723,8 +729,13 @@ def create_app(settings=None):
             path = (root / storage_name).resolve()
             path.write_bytes(content)
             
-            db.execute('INSERT INTO files(id, storage_name, permission, enabled, max_bytes) VALUES(?,?,?,?,?)',
-                       (file_id, storage_name, 'premium', 1, len(content)))
+            cols = [r[1] for r in db.execute('PRAGMA table_info(files)').fetchall()]
+            if 'file_data' in cols:
+                db.execute('INSERT INTO files(id, storage_name, permission, enabled, max_bytes, file_data) VALUES(?,?,?,?,?,?)',
+                           (file_id, storage_name, 'premium', 1, len(content), content))
+            else:
+                db.execute('INSERT INTO files(id, storage_name, permission, enabled, max_bytes) VALUES(?,?,?,?,?)',
+                           (file_id, storage_name, 'premium', 1, len(content)))
             audit(db, 'admin.file.upload', 'allowed', admin['id'], file_id)
             return {
                 'success': True,
@@ -751,6 +762,9 @@ def create_app(settings=None):
             if path.parent != root:
                 deny('invalid_request', 400)
             path.write_bytes(content)
+            cols = [r[1] for r in db.execute('PRAGMA table_info(files)').fetchall()]
+            if 'file_data' in cols:
+                db.execute('UPDATE files SET file_data=? WHERE storage_name=?', (content, storage_name))
             audit(db, 'admin.storage.upload', 'allowed', admin['id'], storage_name)
             return {'success': True, 'storage_name': storage_name, 'bytes': len(content)}
 
@@ -968,13 +982,24 @@ def create_app(settings=None):
             admin = authenticated(db, request, 'admin')
             if body.user_id and not db.execute('SELECT 1 FROM users WHERE id=?', (body.user_id,)).fetchone():
                 deny('not_found', 404)
-            collision = db.execute('SELECT id FROM variables WHERE name=? AND user_id IS ? AND id<>?',
-                                   (body.name, body.user_id, variable_id)).fetchone()
+            if body.user_id:
+                collision = db.execute('SELECT id FROM variables WHERE name=? AND user_id=? AND id<>?',
+                                       (body.name, body.user_id, variable_id)).fetchone()
+            else:
+                collision = db.execute('SELECT id FROM variables WHERE name=? AND user_id IS NULL AND id<>?',
+                                       (body.name, variable_id)).fetchone()
             if collision:
                 deny('variable_exists', 409)
-            db.execute('''INSERT INTO variables VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-                name=excluded.name,user_id=excluded.user_id,value=excluded.value,permission=excluded.permission''',
-                       (variable_id, body.name, body.user_id, body.value, body.permission))
+            cols = [r[1] for r in db.execute('PRAGMA table_info(variables)').fetchall()]
+            if 'application_id' in cols:
+                app_id = request.query_params.get('application_id') or '00000000-0000-4000-8000-000000000001'
+                db.execute('''INSERT INTO variables(id, name, user_id, value, permission, application_id) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,user_id=excluded.user_id,value=excluded.value,permission=excluded.permission,application_id=excluded.application_id''',
+                           (variable_id, body.name, body.user_id, body.value, body.permission, app_id))
+            else:
+                db.execute('''INSERT INTO variables(id, name, user_id, value, permission) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,user_id=excluded.user_id,value=excluded.value,permission=excluded.permission''',
+                           (variable_id, body.name, body.user_id, body.value, body.permission))
             audit(db, 'admin.variable.update', 'allowed', admin['id'], variable_id)
             return {'success': True}
 
@@ -984,14 +1009,33 @@ def create_app(settings=None):
             admin = authenticated(db, request, 'admin')
             root = Path(settings.storage).resolve()
             path = (root / body.storage_name).resolve()
-            if path.parent != root or not path.is_file() or path.stat().st_size > body.max_bytes:
+            cols = [r[1] for r in db.execute('PRAGMA table_info(files)').fetchall()]
+            existing = db.execute('SELECT file_data FROM files WHERE id=?', (file_id,)).fetchone()
+            
+            file_bytes = None
+            if path.parent == root and path.is_file():
+                if path.stat().st_size > body.max_bytes:
+                    deny('invalid_storage_file', 422)
+                file_bytes = path.read_bytes()
+            elif existing and 'file_data' in cols and existing['file_data']:
+                file_bytes = bytes(existing['file_data']) if isinstance(existing['file_data'], (memoryview, bytes)) else existing['file_data']
+                root.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(file_bytes)
+            else:
                 deny('invalid_storage_file', 422)
+
             if db.execute('SELECT 1 FROM files WHERE storage_name=? AND id<>?', (body.storage_name, file_id)).fetchone():
                 deny('file_exists', 409)
-            db.execute('''INSERT INTO files VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-                storage_name=excluded.storage_name,permission=excluded.permission,
-                enabled=excluded.enabled,max_bytes=excluded.max_bytes''',
-                       (file_id, body.storage_name, body.permission, body.enabled, body.max_bytes))
+            if 'file_data' in cols:
+                db.execute('''INSERT INTO files(id, storage_name, permission, enabled, max_bytes, file_data) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                    storage_name=excluded.storage_name,permission=excluded.permission,
+                    enabled=excluded.enabled,max_bytes=excluded.max_bytes,file_data=excluded.file_data''',
+                           (file_id, body.storage_name, body.permission, body.enabled, body.max_bytes, file_bytes))
+            else:
+                db.execute('''INSERT INTO files(id, storage_name, permission, enabled, max_bytes) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                    storage_name=excluded.storage_name,permission=excluded.permission,
+                    enabled=excluded.enabled,max_bytes=excluded.max_bytes''',
+                           (file_id, body.storage_name, body.permission, body.enabled, body.max_bytes))
             audit(db, 'admin.file.update', 'allowed', admin['id'], file_id)
             return {'success': True}
 

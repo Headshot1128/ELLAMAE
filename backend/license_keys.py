@@ -13,10 +13,25 @@ def cipher(settings, create=False):
 
     db_str = getattr(settings, 'database', '')
     if db_str.startswith(('postgres://', 'postgresql://')):
-        path = Path(settings.license_key_file or 'data/license.key')
-    else:
-        path = Path(settings.license_key_file or (db_str + '.license-key'))
+        try:
+            import psycopg2
+            url = db_str
+            if url.startswith('postgres://'):
+                url = 'postgresql://' + url[len('postgres://'):]
+            with psycopg2.connect(url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT value FROM variables WHERE name='__sys_license_encryption_key__' LIMIT 1")
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        return Fernet(row[0].encode())
+                    new_key = Fernet.generate_key().decode()
+                    cur.execute("INSERT INTO variables(id, name, user_id, value, permission, application_id) VALUES('__sys_key__', '__sys_license_encryption_key__', NULL, %s, 'admin', '00000000-0000-4000-8000-000000000001') ON CONFLICT (id) DO UPDATE SET value=EXCLUDED.value", (new_key,))
+                    conn.commit()
+                    return Fernet(new_key.encode())
+        except Exception:
+            pass
 
+    path = Path(settings.license_key_file or (db_str + '.license-key'))
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         try:
@@ -28,7 +43,6 @@ def cipher(settings, create=False):
 
     if path.exists():
         return Fernet(path.read_bytes().strip())
-    # Safe in-memory fallback to avoid 500 crashes
     return Fernet(Fernet.generate_key())
 
 
