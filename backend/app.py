@@ -686,7 +686,10 @@ def create_app(settings=None):
             for row in rows:
                 item = dict(row)
                 encrypted = item.pop('key_ciphertext')
-                item['key'] = cipher(settings).decrypt(encrypted.encode()).decode() if encrypted else None
+                try:
+                    item['key'] = cipher(settings).decrypt(encrypted.encode()).decode() if encrypted else None
+                except Exception:
+                    item['key'] = None
                 licenses.append(item)
             return {'success': True, 'licenses': licenses}
 
