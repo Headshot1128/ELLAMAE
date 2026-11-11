@@ -34,6 +34,7 @@ class Credentials(Input):
 class ApplicationCredentials(Credentials):
     password: str = Field(min_length=1)
     hardware_id: str = Field(min_length=10, max_length=256)  # required – Windows SID e.g. S-1-5-21-...
+    client_version: str | None = Field(default=None, max_length=32)
 
 
 class Registration(ApplicationCredentials):
@@ -73,11 +74,15 @@ class LicenseExtension(Input):
 
 class ApplicationCreate(Input):
     name: str = Field(min_length=1, max_length=64)
+    min_version: str | None = Field(default='1.0.0', max_length=32)
+    download_url: str | None = Field(default='', max_length=256)
 
 
 class ApplicationUpdate(Input):
     name: str = Field(min_length=1, max_length=64)
     status: Literal['active', 'disabled'] = 'active'
+    min_version: str | None = Field(default='1.0.0', max_length=32)
+    download_url: str | None = Field(default='', max_length=256)
 
 
 class ResellerCreate(Input):
@@ -129,6 +134,32 @@ class FileMetadata(Input):
     permission: str = Field(pattern=r'^[a-zA-Z0-9_.:-]{1,100}$')
     enabled: bool = True
     max_bytes: int = Field(gt=0, le=1024 * 1024 * 1024)
+
+
+def parse_version_tuple(v: str) -> tuple[int, ...]:
+    if not v:
+        return (0,)
+    clean = re.sub(r'[^0-9.]', '', v.split('-')[0].split('+')[0])
+    parts = []
+    for p in clean.split('.'):
+        if p.isdigit():
+            parts.append(int(p))
+    return tuple(parts) if parts else (0,)
+
+
+def is_version_outdated(client_v: str | None, min_v: str | None) -> bool:
+    if not min_v:
+        return False
+    min_parsed = parse_version_tuple(min_v)
+    if not any(min_parsed):
+        return False
+    if not client_v:
+        return True
+    client_parsed = parse_version_tuple(client_v)
+    length = max(len(client_parsed), len(min_parsed))
+    c_padded = client_parsed + (0,) * (length - len(client_parsed))
+    m_padded = min_parsed + (0,) * (length - len(min_parsed))
+    return c_padded < m_padded
 
 
 def deny(code, status=401):
@@ -314,10 +345,22 @@ def create_app(settings=None):
                     or '00000000-0000-4000-8000-000000000001'
                 )
                 try:
-                    app = db.execute("SELECT status FROM applications WHERE id=?", (app_id,)).fetchone()
+                    app = db.execute("SELECT * FROM applications WHERE id=?", (app_id,)).fetchone()
                     if app and app['status'] != 'active':
                         audit(db, 'login.application_disabled', 'denied', user['id'])
                         deny('application_disabled', 403)
+                    if app:
+                        app_dict = dict(app)
+                        min_ver = app_dict.get('min_version')
+                        if min_ver:
+                            client_ver = (
+                                getattr(body, 'client_version', None)
+                                or request.headers.get('x-client-version')
+                                or request.query_params.get('version')
+                            )
+                            if is_version_outdated(client_ver, min_ver):
+                                audit(db, 'login.version_outdated', 'denied', user['id'])
+                                deny('update_required', 426)
                 except HTTPException:
                     raise
                 except Exception:
@@ -478,6 +521,22 @@ def create_app(settings=None):
             except HTTPException:
                 db.execute("DELETE FROM active_heartbeats WHERE user_id=?", (user['id'],))
                 deny('permission_denied', 403)
+
+            # If application version was bumped by admin mid-game → tell client to update
+            client_ver = request.headers.get('x-client-version') or request.query_params.get('version')
+            if client_ver:
+                app_id = (
+                    request.query_params.get('application_id')
+                    or request.headers.get('x-application-id')
+                    or (user['application_id'] if 'application_id' in user.keys() else None)
+                    or '00000000-0000-4000-8000-000000000001'
+                )
+                app = db.execute("SELECT * FROM applications WHERE id=?", (app_id,)).fetchone()
+                if app:
+                    min_ver = dict(app).get('min_version')
+                    if min_ver and is_version_outdated(client_ver, min_ver):
+                        db.execute("DELETE FROM active_heartbeats WHERE user_id=?", (user['id'],))
+                        deny('update_required', 426)
 
             t = now()
             db.execute("CREATE TABLE IF NOT EXISTS active_heartbeats (user_id TEXT PRIMARY KEY, last_seen BIGINT NOT NULL, session_id TEXT, username TEXT)")
@@ -1147,20 +1206,35 @@ def create_app(settings=None):
     def create_application(body: ApplicationCreate, request: Request):
         with connect(settings) as db:
             admin = authenticated(db, request, 'admin')
-            db.execute('CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT \'active\', created_at INTEGER NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT \'active\', created_at INTEGER NOT NULL, min_version TEXT DEFAULT \'1.0.0\', download_url TEXT DEFAULT \'\')')
             app_id = uid()
-            db.execute('INSERT INTO applications(id, name, status, created_at) VALUES(?,?,?,?)', (app_id, body.name, 'active', now()))
+            min_ver = body.min_version or '1.0.0'
+            url = body.download_url or ''
+            cols = [r[1] for r in db.execute('PRAGMA table_info(applications)').fetchall()]
+            if 'min_version' in cols and 'download_url' in cols:
+                db.execute('INSERT INTO applications(id, name, status, created_at, min_version, download_url) VALUES(?,?,?,?,?,?)',
+                           (app_id, body.name, 'active', now(), min_ver, url))
+            else:
+                db.execute('INSERT INTO applications(id, name, status, created_at) VALUES(?,?,?,?)',
+                           (app_id, body.name, 'active', now()))
             audit(db, 'admin.application.create', 'allowed', admin['id'], app_id)
-            return {'success': True, 'id': app_id, 'name': body.name}
+            return {'success': True, 'id': app_id, 'name': body.name, 'min_version': min_ver, 'download_url': url}
 
     @app.put('/v1/admin/applications/{app_id}')
     def update_application(app_id: str, body: ApplicationUpdate, request: Request):
         with connect(settings) as db:
             admin = authenticated(db, request, 'admin')
-            db.execute('CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT \'active\', created_at INTEGER NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT \'active\', created_at INTEGER NOT NULL, min_version TEXT DEFAULT \'1.0.0\', download_url TEXT DEFAULT \'\')')
             if not db.execute('SELECT 1 FROM applications WHERE id=?', (app_id,)).fetchone():
                 deny('not_found', 404)
-            db.execute('UPDATE applications SET name=?, status=? WHERE id=?', (body.name, body.status, app_id))
+            min_ver = body.min_version or '1.0.0'
+            url = body.download_url or ''
+            cols = [r[1] for r in db.execute('PRAGMA table_info(applications)').fetchall()]
+            if 'min_version' in cols and 'download_url' in cols:
+                db.execute('UPDATE applications SET name=?, status=?, min_version=?, download_url=? WHERE id=?',
+                           (body.name, body.status, min_ver, url, app_id))
+            else:
+                db.execute('UPDATE applications SET name=?, status=? WHERE id=?', (body.name, body.status, app_id))
             if body.status != 'active':
                 try:
                     cols = [r[1] for r in db.execute('PRAGMA table_info(users)').fetchall()]
