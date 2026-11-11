@@ -338,8 +338,18 @@ def create_app(settings=None):
                         audit(db, 'login', 'denied')
                         deny('hardware_mismatch', 403)
                     if not stored:
-                        # First login — bind this SID permanently to the account
+                        # First login after account creation OR after a HWID reset.
+                        # Bind the new SID to the user account.
                         db.execute('UPDATE users SET hardware_hash=? WHERE id=?', (hw_hash, user['id']))
+                        # Also re-bind any licenses whose hardware_hash was cleared by a
+                        # HWID reset (hardware_bound=1 but hardware_hash=NULL).
+                        # Without this, entitled() rejects them because the license query
+                        # requires (hardware_bound=0 OR hardware_hash=<new hash>) but finds
+                        # hardware_bound=1 AND hardware_hash=NULL — which never matches.
+                        db.execute(
+                            'UPDATE licenses SET hardware_hash=? WHERE user_id=? AND hardware_bound=1 AND hardware_hash IS NULL',
+                            (hw_hash, user['id'])
+                        )
             if audience == 'admin' and not website_allowed(user, settings):
                 audit(db, 'login.approval_required', 'denied', user['id'])
                 deny('website_approval_required', 403)
