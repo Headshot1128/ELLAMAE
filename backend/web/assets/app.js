@@ -83,6 +83,90 @@ class ApiError extends Error {
   constructor(code, status = 0) { super(messages[code] || `Request failed (${status || code}).`); this.code = code; this.status = status; }
 }
 let isOwner = false, isReseller = false, resellerMaxDays = 30, resellerRevision = 0;
+let keysVisible = true;
+function maskKey(key) {
+  if (!key) return '';
+  if (key.length <= 8) return '••••••••';
+  return key.slice(0, 4) + '-••••-••••-' + key.slice(-4);
+}
+function displayKey(key) {
+  if (!key) return '';
+  return keysVisible ? key : maskKey(key);
+}
+function exportCurrentViewToCsv() {
+  if (!records || !records.length) {
+    toast('No records to export on this page.');
+    return;
+  }
+  const dateStr = new Date().toISOString().slice(0, 10);
+  let filename = `${currentView}_${dateStr}.csv`;
+  let headers = [];
+
+  if (currentView === 'users') {
+    headers = [
+      { label: 'Username', get: r => r.username },
+      { label: 'Status', get: r => r.status },
+      { label: 'HWID Bound', get: r => r.hwid_bound ? 'Bound' : 'Not bound' },
+      { label: 'Subscription Until', get: r => stamp(r.subscription_until) },
+      { label: 'Role', get: r => r.role },
+      { label: 'Keys', get: r => (r.licenses || []).map(l => l.key || l.id).join('; ') },
+      { label: 'User ID', get: r => r.id }
+    ];
+  } else if (currentView === 'licenses' || currentView === 'reseller_licenses') {
+    headers = [
+      { label: 'License Key', get: r => r.key || 'Unavailable' },
+      { label: 'Customer', get: r => r.username || 'Unassigned' },
+      { label: 'Permission', get: r => r.permission || 'premium' },
+      { label: 'Status', get: r => r.revoked ? 'Revoked' : (r.frozen_at != null ? 'Frozen' : (r.expires_at <= Date.now()/1000 ? 'Expired' : 'Active')) },
+      { label: 'Expires At', get: r => stamp(r.expires_at) },
+      { label: 'Frozen At', get: r => r.frozen_at != null ? stamp(r.frozen_at) : '' },
+      { label: 'Hardware Bound', get: r => r.hardware_bound ? 'Yes' : 'No' },
+      { label: 'License ID', get: r => r.id }
+    ];
+  } else if (currentView === 'audit') {
+    headers = [
+      { label: 'ID', get: r => r.id },
+      { label: 'Timestamp', get: r => stamp(r.timestamp) },
+      { label: 'Event', get: r => r.event },
+      { label: 'Outcome', get: r => r.outcome },
+      { label: 'Actor ID', get: r => r.actor_id || '' },
+      { label: 'Target', get: r => r.target || '' }
+    ];
+  } else if (currentView === 'resellers') {
+    headers = [
+      { label: 'Username', get: r => r.username },
+      { label: 'Status', get: r => r.status },
+      { label: 'Max Days', get: r => r.max_days },
+      { label: 'Created At', get: r => stamp(r.created_at) },
+      { label: 'ID', get: r => r.id }
+    ];
+  } else {
+    toast('Export not supported for this view.');
+    return;
+  }
+
+  const escapeCsv = (val) => {
+    if (val === null || val === undefined) return '""';
+    const s = String(val).replace(/"/g, '""');
+    return `"${s}"`;
+  };
+
+  const csvContent = [
+    headers.map(h => escapeCsv(h.label)).join(','),
+    ...records.map(row => headers.map(h => escapeCsv(h.get(row))).join(','))
+  ].join('\r\n');
+
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast(`Exported ${records.length} records to ${filename}`);
+}
 const REMEMBER_KEY = 'novyx_saved_session_v1';
 let rememberedSession = false;
 let access = '', refreshToken = '', expiry = 0, epoch = 0, currentView = 'overview', offset = 0;
@@ -209,12 +293,12 @@ function rowMarkup(row) {
   const actions = (buttons) => `<div class="row-actions">${buttons.map(([action,label]) => `<button data-row-action="${action}" data-id="${id}">${label}</button>`).join('')}</div>`;
   let cells;
   if (currentView === 'resellers') cells=[`<div class="user-cell"><span class="avatar">${esc(row.username[0].toUpperCase())}</span><div><strong>${esc(row.username)}</strong><span class="cell-subtitle">Reseller account</span></div></div>`,badge(row.status,row.status==='active'?'':'warn'),`${esc(row.max_days)} days`,esc(stamp(row.created_at)),actions([['edit-reseller','Manage']])];
-  else if(currentView==='reseller_licenses')cells=[`<strong class="license-key">${esc(row.key||'Unavailable')}</strong><span class="cell-subtitle">SID binding enabled</span>`,esc(row.username||'Ready to assign'),esc(stamp(row.expires_at)),badge(row.revoked?'Revoked':row.expires_at<=Date.now()/1000?'Expired':'Active',row.revoked?'bad':''),actions([['copy-license','Copy key']])];
+  else if(currentView==='reseller_licenses')cells=[`<strong class="license-key">${esc(displayKey(row.key)||'Unavailable')}</strong><span class="cell-subtitle">SID binding enabled</span>`,esc(row.username||'Ready to assign'),esc(stamp(row.expires_at)),badge(row.revoked?'Revoked':row.expires_at<=Date.now()/1000?'Expired':'Active',row.revoked?'bad':''),actions([['copy-license','Copy key']])];
   else if (currentView === 'applications') cells = [
     `<strong>${esc(row.name)}</strong>`, `<code class=code-pill>${esc(row.id)}</code>`,badge(row.status,row.status==='active'?'':'warn'),actions([['copy-application','Copy ID'],['edit-application','Manage'],...(row.id!=='00000000-0000-4000-8000-000000000001'?[['delete-application','Delete']]:[])])];
   else if (currentView === 'users') cells = [
     `<strong>${esc(row.username)}</strong>`,
-    row.licenses?.length?row.licenses.map(license=>`<div><strong class=license-key>${esc(license.key || (license.id ? 'LIC-' + shortId(license.id).toUpperCase() : 'Active key'))}</strong><span class=cell-subtitle>${esc(license.revoked?'Revoked':license.expires_at<=Date.now()/1000?'Expired':'Active')} &bull; ${esc(stamp(license.expires_at))}</span></div>`).join(''):badge('No key registered','neutral'),
+    row.licenses?.length?row.licenses.map(license=>`<div><strong class=license-key>${esc(displayKey(license.key) || (license.id ? 'LIC-' + shortId(license.id).toUpperCase() : 'Active key'))}</strong><span class=cell-subtitle>${esc(license.revoked?'Revoked':license.expires_at<=Date.now()/1000?'Expired':'Active')} &bull; ${esc(stamp(license.expires_at))}</span></div>`).join(''):badge('No key registered','neutral'),
     badge(row.status==='suspended'?'Banned':row.status,row.status==='active'?'':'bad'),badge(row.hwid_bound?'Bound':'Not bound','neutral'),esc(stamp(row.subscription_until)),
     actions([['edit','Manage'],['reset-user-hwid','Reset HWID'],[row.status==='active'?'ban-user':'unban-user',row.status==='active'?'Ban':'Unban'],['delete-user','Delete user']]) ];
   else if (currentView === 'website_users') cells = [
@@ -222,7 +306,7 @@ function rowMarkup(row) {
     badge(row.status==='suspended'&&!row.console_only?'Banned':row.status, row.status === 'active' ? '' : 'bad'), row.is_owner ? badge('Owner') : !row.console_only && row.role !== 'admin' ? badge('EXE only','neutral') : row.web_approved ? badge('Approved') : badge('Not approved','warn'), badge(row.is_owner ? 'owner' : row.console_only ? 'website user' : 'application (EXE)','neutral'),
     actions([['edit','Manage'],...(row.console_only || row.role === 'admin' ? [['permissions','Website access']] : []),['delete-user','Delete user'],...(!row.console_only&&row.role!=='admin'?[['reset-user-hwid','Reset HWID'],[row.status==='active'?'ban-user':'unban-user',row.status==='active'?'Ban':'Unban']]:[])]) ];
   else if (currentView === 'licenses') cells = [
-    `<strong class="license-key">${esc(row.key || (row.username ? 'Bound (' + row.username + ')' : 'Legacy (' + shortId(row.id) + ')'))}</strong><span class="cell-subtitle">${row.hardware_bound ? 'Hardware bound' : 'Account license'} &bull; ${esc(shortId(row.id))}</span>`,
+    `<strong class="license-key">${esc(displayKey(row.key) || (row.username ? 'Bound (' + row.username + ')' : 'Legacy (' + shortId(row.id) + ')'))}</strong><span class="cell-subtitle">${row.hardware_bound ? 'Hardware bound' : 'Account license'} &bull; ${esc(shortId(row.id))}</span>`,
     `<code class="code-pill">${esc(row.permission)}</code>`, esc(row.username || 'Unassigned'), esc(row.frozen_at != null ? 'Frozen' : stamp(row.expires_at)),
     row.revoked ? badge('Revoked','bad') : row.frozen_at != null ? badge('Frozen','warn') : row.expires_at <= Date.now()/1000 ? badge('Expired','warn') : badge('Active'), row.revoked ? '&mdash;' : actions([...(row.hardware_bound ? [['reset-hwid','HWID Reset']] : []),['freeze',row.frozen_at != null ? 'Unfreeze' : 'Freeze'],['extend','Add days'],['revoke','Revoke']]) ];
   else if (currentView === 'variables') cells = [
@@ -236,14 +320,48 @@ function rowMarkup(row) {
   return `<tr>${cells.map((value) => `<td>${value}</td>`).join('')}</tr>`;
 }
 function tableBody(query = '') {
-  const filtered = records.filter((row) => Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(query.toLowerCase())));
+  let filtered = records;
+  if (currentView === 'audit') {
+    const ev = $('#audit-event-filter')?.value || '';
+    const out = $('#audit-outcome-filter')?.value || '';
+    if (ev) filtered = filtered.filter(r => (r.event || '').toLowerCase().includes(ev.toLowerCase()));
+    if (out) filtered = filtered.filter(r => (r.outcome || '').toLowerCase() === out.toLowerCase());
+  }
+  if (query) {
+    filtered = filtered.filter((row) => Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(query.toLowerCase())));
+  }
   $('#table-rows').innerHTML = filtered.map(rowMarkup).join('');
   $('#table-empty').hidden = !!filtered.length;
   $('#table-data').hidden = !filtered.length;
 }
 function renderTable() {
   const title = views[currentView].title;
-  return `<section class="card"><div class="table-toolbar"><h2>${esc(title)} <span>${records.length}${records.length === 100 ? '+' : ''}</span></h2>${currentView==='users'?'<button class=button data-command=lookup-user>Find username</button>':''}<div class="search-wrap">${icon('search')}<input id="table-search" type="search" placeholder="Search this page…" aria-label="Search ${esc(title)} on this page"></div></div><div class="table-scroll" id="table-data"><table><thead><tr>${headings[currentView].map((heading) => `<th scope="col">${heading}</th>`).join('')}</tr></thead><tbody id="table-rows"></tbody></table></div><div id="table-empty" hidden>${empty(`No ${title.toLowerCase()} found`,currentView === 'files' ? 'Choose Upload file above to get a file ID for your C++ application.' : 'New records will appear here. Try a different search or add your first record.',currentView === 'audit' ? 'activity' : currentView === 'licenses' ? 'key' : currentView === 'users' ? 'users' : 'files')}</div><div class="table-footer"><span>Page ${Math.floor(offset/100)+1} · ${records.length} records loaded</span><div class="pagination"><button id="previous-page" ${offset === 0 ? 'disabled' : ''}>← Previous</button><button id="next-page" ${records.length < 100 ? 'disabled' : ''}>Next →</button></div></div></section>`;
+  const isKeyView = currentView === 'licenses' || currentView === 'reseller_licenses';
+  const isExportable = ['users', 'licenses', 'reseller_licenses', 'audit', 'resellers'].includes(currentView);
+
+  const keyToggleBtn = isKeyView ? `<button class="button" id="toggle-keys-btn" type="button" style="margin-right:4px;">${keysVisible ? 'Hide keys' : 'Show keys'}</button>` : '';
+  const exportBtn = isExportable ? `<button class="button" id="export-csv-btn" type="button" style="margin-right:4px;">Export CSV</button>` : '';
+  const lookupBtn = currentView === 'users' ? '<button class="button" data-command="lookup-user" type="button" style="margin-right:4px;">Find username</button>' : '';
+
+  const auditFilters = currentView === 'audit' ? `
+    <select id="audit-event-filter" class="button" style="margin-right:4px;padding:6px 10px;font-size:13px;cursor:pointer;">
+      <option value="">All events</option>
+      <option value="login">Logins</option>
+      <option value="registration">Registrations</option>
+      <option value="download">Downloads</option>
+      <option value="activation">Key Activations</option>
+      <option value="admin">Admin actions</option>
+      <option value="rate_limit">Rate limits</option>
+    </select>
+    <select id="audit-outcome-filter" class="button" style="margin-right:4px;padding:6px 10px;font-size:13px;cursor:pointer;">
+      <option value="">All outcomes</option>
+      <option value="allowed">Allowed</option>
+      <option value="denied">Denied</option>
+      <option value="revoked">Revoked</option>
+    </select>
+  ` : '';
+
+  return `<section class="card"><div class="table-toolbar"><h2>${esc(title)} <span>${records.length}${records.length === 100 ? '+' : ''}</span></h2><div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;">${lookupBtn}${keyToggleBtn}${auditFilters}${exportBtn}<div class="search-wrap">${icon('search')}<input id="table-search" type="search" placeholder="Search this page…" aria-label="Search ${esc(title)} on this page"></div></div></div><div class="table-scroll" id="table-data"><table><thead><tr>${headings[currentView].map((heading) => `<th scope="col">${heading}</th>`).join('')}</tr></thead><tbody id="table-rows"></tbody></table></div><div id="table-empty" hidden>${empty(`No ${title.toLowerCase()} found`,currentView === 'files' ? 'Choose Upload file above to get a file ID for your C++ application.' : 'New records will appear here. Try a different search or add your first record.',currentView === 'audit' ? 'activity' : currentView === 'licenses' ? 'key' : currentView === 'users' ? 'users' : 'files')}</div><div class="table-footer"><span>Page ${Math.floor(offset/100)+1} · ${records.length} records loaded</span><div class="pagination"><button id="previous-page" ${offset === 0 ? 'disabled' : ''}>← Previous</button><button id="next-page" ${records.length < 100 ? 'disabled' : ''}>Next →</button></div></div></section>`;
 }
 function renderPageData(view,data,preserveSearch = true) {
   if(view==='reseller_licenses')renderResellerLicenses(data);
@@ -722,10 +840,26 @@ $('#page-action').addEventListener('click',pageAction);
 $('#menu-toggle').addEventListener('click',() => { const open = $('#sidebar').classList.toggle('open'); $('#menu-toggle').setAttribute('aria-expanded',String(open)); });
 $('#modal').addEventListener('close', () => { if (!$('#modal').open) $('#modal-content').replaceChildren(); });
 document.addEventListener('input',(event) => { if (event.target.id === 'table-search') tableBody(event.target.value); });
+document.addEventListener('change', (event) => {
+  if (event.target.id === 'audit-event-filter' || event.target.id === 'audit-outcome-filter') {
+    tableBody($('#table-search')?.value || '');
+  }
+});
 document.addEventListener('click',async (event) => {
   if (!(event.target instanceof Element)) return;
   const button = event.target.closest('button'); if (!button) return;
   if (button.hasAttribute('data-close')) { $('#modal').close(); return; }
+  if (button.id === 'toggle-keys-btn') {
+    keysVisible = !keysVisible;
+    button.textContent = keysVisible ? 'Hide keys' : 'Show keys';
+    tableBody($('#table-search')?.value || '');
+    toast(keysVisible ? 'License keys unmasked.' : 'License keys masked.');
+    return;
+  }
+  if (button.id === 'export-csv-btn') {
+    exportCurrentViewToCsv();
+    return;
+  }
   if (button.dataset.view) {
     if (button.dataset.view === currentView && $('#page-content').getAttribute('aria-busy') === 'true') return;
     loadPage(button.dataset.view); return;
