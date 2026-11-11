@@ -286,7 +286,7 @@ function renderOverview(data) {
 const headings = {
   resellers:['Reseller','Status','Maximum key duration','Added','Actions'],
   reseller_licenses:['License key','Customer','Expires','Status','Actions'],
-  applications:['Application','Application ID','Status','Actions'],
+  applications:['Application','Application ID','Min Version','Status','Actions'],
   users:['Username','Registered license key','Status','HWID','Subscription','Actions'],
   website_users:['User','Status','Website access','Role','Actions'],
   licenses:['License','Permission','Assigned to','Expires','Status','Actions'],
@@ -301,7 +301,7 @@ function rowMarkup(row) {
   if (currentView === 'resellers') cells=[`<div class="user-cell"><span class="avatar">${esc(row.username[0].toUpperCase())}</span><div><strong>${esc(row.username)}</strong><span class="cell-subtitle">Reseller account</span></div></div>`,badge(row.status,row.status==='active'?'':'warn'),`${esc(row.max_days)} days`,esc(stamp(row.created_at)),actions([['edit-reseller','Manage']])];
   else if(currentView==='reseller_licenses')cells=[`<strong class="license-key">${esc(displayKey(row.key)||'Unavailable')}</strong><span class="cell-subtitle">SID binding enabled</span>`,esc(row.username||'Ready to assign'),esc(stamp(row.expires_at)),badge(row.revoked?'Revoked':row.expires_at<=Date.now()/1000?'Expired':'Active',row.revoked?'bad':''),actions([['copy-license','Copy key']])];
   else if (currentView === 'applications') cells = [
-    `<strong>${esc(row.name)}</strong>`, `<code class=code-pill>${esc(row.id)}</code>`,badge(row.status,row.status==='active'?'':'warn'),actions([['copy-application','Copy ID'],['edit-application','Manage'],...(row.id!=='00000000-0000-4000-8000-000000000001'?[['delete-application','Delete']]:[])])];
+    `<strong>${esc(row.name)}</strong>`, `<code class=code-pill>${esc(row.id)}</code>`,`<code class=code-pill style="font-weight:600">v${esc(row.min_version||'1.0.0')}</code>`,badge(row.status,row.status==='active'?'':'warn'),actions([['copy-application','Copy ID'],['edit-application','Manage'],...(row.id!=='00000000-0000-4000-8000-000000000001'?[['delete-application','Delete']]:[])])];
   else if (currentView === 'users') cells = [
     `<strong>${esc(row.username)}</strong>`,
     row.licenses?.length?row.licenses.map(license=>`<div><strong class=license-key>${esc(displayKey(license.key) || (license.id ? 'LIC-' + shortId(license.id).toUpperCase() : 'Active key'))}</strong><span class=cell-subtitle>${esc(license.revoked?'Revoked':license.expires_at<=Date.now()/1000?'Expired':'Active')} &bull; ${esc(stamp(license.expires_at))}</span></div>`).join(''):badge('No key registered','neutral'),
@@ -711,9 +711,16 @@ async function loadApplications(preferred = activeApplication) {
 function editApplication(row) {
   openModal(row?'Manage application':'Create application','EXE accounts and keys belong to one application. Approved website accounts can create and manage applications.',
     field('name','Application name','text',row?.name||'',{max:64,help:'For example: External or Spoofer. An Application ID is generated automatically.'})+
+    field('min_version','Minimum client version','text',row?.min_version||'1.0.0',{max:32,help:'Blocks older builds from logging in. e.g. 1.0.1'})+
+    field('download_url','Update / Download URL','text',row?.download_url||'',{max:256,help:'Where users can download the update. e.g. https://yourwebsite.com/download'})+
     (row?field('status','Status','select',row.status,{choices:[['active','Active'],['disabled','Disabled — block EXE access']]})+`<p>Application ID: <code>${esc(row.id)}</code></p>`:''),
     row?'Save application':'Create application',async form=>{
-      const data=await api(row?`/v1/admin/applications/${encodeURIComponent(row.id)}`:'/v1/admin/applications',row?'PUT':'POST',{name:form.get('name'),...(row?{status:form.get('status')}:{})});
+      const data=await api(row?`/v1/admin/applications/${encodeURIComponent(row.id)}`:'/v1/admin/applications',row?'PUT':'POST',{
+        name:form.get('name'),
+        min_version:form.get('min_version')||'1.0.0',
+        download_url:form.get('download_url')||'',
+        ...(row?{status:form.get('status')}:{})
+      });
       pageCache.clear();await loadApplications(row?activeApplication:data.id);
       await changed(row?'Application updated.':'Application created and selected.');
       if (!row) {
