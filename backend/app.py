@@ -355,6 +355,9 @@ def create_app(settings=None):
                 deny('website_approval_required', 403)
             if passwords.check_needs_rehash(user['password_hash']):
                 db.execute('UPDATE users SET password_hash=? WHERE id=?', (passwords.hash(body.password), user['id']))
+            if audience == 'client':
+                # Enforce max 1 concurrent session per user: revoke any previous active sessions
+                db.execute("UPDATE sessions SET revoked=1 WHERE user_id=? AND audience='client' AND revoked=0", (user['id'],))
             hw_hash_for_session = digest(body.hardware_id) if getattr(body, 'hardware_id', None) else None
             sid = uid()
             session_seconds = 30 * 86400 if (audience == 'admin' and getattr(body, 'remember', False)) else settings.session_seconds
@@ -1320,13 +1323,28 @@ def create_app(settings=None):
 
 
     @app.get('/v1/admin/audit')
-    def logs(request: Request, after: int = 0, recent: bool = False, offset: int = 0):
+    def logs(request: Request, after: int = 0, recent: bool = False, offset: int = 0, event: str | None = None, outcome: str | None = None):
         with connect(settings) as db:
             admin = authenticated(db, request, 'admin')
+            conditions = []
+            params = []
+            if event:
+                conditions.append("event LIKE ?")
+                params.append(f"%{event}%")
+            if outcome:
+                conditions.append("outcome = ?")
+                params.append(outcome)
+
             if recent:
-                rows = db.execute('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100 OFFSET ?', (max(0, offset),)).fetchall()
+                if conditions:
+                    rows = db.execute(f"SELECT * FROM audit_logs WHERE {' AND '.join(conditions)} ORDER BY id DESC LIMIT 100 OFFSET ?", (*params, max(0, offset))).fetchall()
+                else:
+                    rows = db.execute('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100 OFFSET ?', (max(0, offset),)).fetchall()
             else:
-                rows = db.execute('SELECT * FROM audit_logs WHERE id>? ORDER BY id LIMIT 100', (after,)).fetchall()
+                if conditions:
+                    rows = db.execute(f"SELECT * FROM audit_logs WHERE id>? AND {' AND '.join(conditions)} ORDER BY id LIMIT 100", (after, *params)).fetchall()
+                else:
+                    rows = db.execute('SELECT * FROM audit_logs WHERE id>? ORDER BY id LIMIT 100', (after,)).fetchall()
             audit(db, 'admin.audit.read', 'allowed', admin['id'])
             return {'success': True, 'events': [dict(r) for r in rows]}
 
