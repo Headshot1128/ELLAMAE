@@ -271,7 +271,13 @@ function eventList(events) {
   return `<div class="activity-list">${events.map((row) => `<div class="activity-item"><span class="event-symbol">${icon(row.event.includes('login') ? 'shield' : 'activity')}</span><div class="activity-main"><strong>${esc(eventName(row.event))}</strong><small>${esc(row.actor_id ? `Actor ${shortId(row.actor_id)}` : 'System event')} · ${esc(row.outcome)}</small></div><span class="activity-time">${esc(new Date(row.timestamp*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}))}</span></div>`).join('')}</div>`;
 }
 function renderOverview(data) {
-  const cards = [ ['Total users',data.counts.users,'users','Accounts in your workspace'], ['Active subscriptions',data.counts.subscribers,'shield','Active accounts with time remaining'], ['Active licenses',data.counts.licenses,'key','Unexpired and available for access'], ['Protected files',data.counts.files,'files','Enabled for authorized downloads'] ];
+  const cards = [
+    ['Total users',data.counts.users,'users','Accounts in your workspace'],
+    ['Currently online',data.counts.online ?? 0,'activity','Active heartbeats (past 3 min)'],
+    ['Active subscriptions',data.counts.subscribers,'shield','Active accounts with time remaining'],
+    ['Active licenses',data.counts.licenses,'key','Unexpired and available for access'],
+    ['Protected files',data.counts.files,'files','Enabled for authorized downloads']
+  ];
   return `<div class="stats-grid">${cards.map(([label,count,type,note]) => `<div class="stat-card"><div class="stat-top"><span>${label}</span><span class="stat-icon">${icon(type)}</span></div><div class="stat-number">${esc(count)}</div><div class="stat-bottom"><span class="status-dot"></span>${note}</div></div>`).join('')}</div>
   <div class="overview-columns"><section class="card"><div class="card-heading"><div><h2>Recent activity</h2><p>The latest events across your workspace</p></div><button class="text-button" data-view="audit">View all activity ↗</button></div>${eventList(data.recent)}</section>
   <div class="overview-side"><section class="card"><div class="card-heading"><div><h2>Access by design</h2><p>The controls behind your application</p></div><span class="stat-icon">${icon('shield')}</span></div><div class="posture"><div class="posture-item"><span class="check-icon">✓</span><div><strong>Server-side authorization</strong><p>Sessions and permissions are checked on every protected request.</p></div></div><div class="posture-item"><span class="check-icon">✓</span><div><strong>Short-lived sessions</strong><p>Access tokens expire. Refresh tokens rotate with replay detection.</p></div></div><div class="posture-item"><span class="check-icon">✓</span><div><strong>Private file delivery</strong><p>Files stream through authenticated endpoints, with no public storage links.</p></div></div></div></section>
