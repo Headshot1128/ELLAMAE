@@ -1241,9 +1241,9 @@ def create_app(settings=None):
             cursor = db.execute("PRAGMA table_info(licenses)")
             lic_cols = [r[1] for r in cursor.fetchall()]
             if 'reseller_id' in lic_cols:
-                rows = db.execute("SELECT l.id, l.expires_at, l.hardware_bound, l.revoked, l.key_ciphertext, u.username FROM licenses l LEFT JOIN users u ON u.id=l.user_id WHERE l.reseller_id=? ORDER BY l.rowid DESC LIMIT 100 OFFSET ?", (user['id'], max(0, offset))).fetchall()
+                rows = db.execute("SELECT l.id, l.expires_at, l.hardware_bound, l.revoked, l.key_ciphertext, u.username FROM licenses l LEFT JOIN users u ON u.id=l.user_id WHERE l.reseller_id=? ORDER BY l.expires_at DESC, l.id DESC LIMIT 100 OFFSET ?", (user['id'], max(0, offset))).fetchall()
             else:
-                rows = db.execute("SELECT l.id, l.expires_at, l.hardware_bound, l.revoked, l.key_ciphertext, u.username FROM licenses l LEFT JOIN users u ON u.id=l.user_id ORDER BY l.rowid DESC LIMIT 100 OFFSET ?", (max(0, offset),)).fetchall()
+                rows = db.execute("SELECT l.id, l.expires_at, l.hardware_bound, l.revoked, l.key_ciphertext, u.username FROM licenses l LEFT JOIN users u ON u.id=l.user_id ORDER BY l.expires_at DESC, l.id DESC LIMIT 100 OFFSET ?", (max(0, offset),)).fetchall()
             licenses = []
             for r in rows:
                 item = dict(r)
