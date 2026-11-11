@@ -166,6 +166,9 @@ def migrate(settings):
             CREATE TABLE IF NOT EXISTS rate_limits(
                 bucket TEXT PRIMARY KEY, window_start BIGINT NOT NULL, count INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS active_heartbeats(
+                user_id TEXT PRIMARY KEY, last_seen BIGINT NOT NULL, session_id TEXT, username TEXT
+            );
             INSERT INTO applications(id, name, status, created_at)
             VALUES('00000000-0000-4000-8000-000000000001', 'Default application', 'active', 0)
             ON CONFLICT (id) DO NOTHING;
@@ -174,6 +177,7 @@ def migrate(settings):
 
     with sqlite3.connect(settings.database) as db:
         db.execute('PRAGMA journal_mode=WAL')
+        db.execute('CREATE TABLE IF NOT EXISTS active_heartbeats(user_id TEXT PRIMARY KEY, last_seen BIGINT NOT NULL, session_id TEXT, username TEXT)')
         db.execute('CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)')
         if not db.execute('SELECT 1 FROM schema_migrations WHERE version=1').fetchone():
             sql = (Path(__file__).parent / 'migrations/001_initial.sql').read_text()
