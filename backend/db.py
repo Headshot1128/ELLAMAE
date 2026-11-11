@@ -138,8 +138,11 @@ def migrate(settings):
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, permission TEXT NOT NULL, PRIMARY KEY(user_id, permission)
             );
             CREATE TABLE IF NOT EXISTS applications(
-                id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at BIGINT NOT NULL
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at BIGINT NOT NULL,
+                min_version TEXT DEFAULT '1.0.0', download_url TEXT DEFAULT ''
             );
+            ALTER TABLE applications ADD COLUMN IF NOT EXISTS min_version TEXT DEFAULT '1.0.0';
+            ALTER TABLE applications ADD COLUMN IF NOT EXISTS download_url TEXT DEFAULT '';
             CREATE TABLE IF NOT EXISTS reseller_profiles(
                 user_id TEXT PRIMARY KEY, max_days INTEGER NOT NULL DEFAULT 30
             );
@@ -199,4 +202,7 @@ def migrate(settings):
             db.executescript('BEGIN IMMEDIATE;\n' + sql + '\nCOMMIT;')
         if not db.execute('SELECT 1 FROM schema_migrations WHERE version=7').fetchone():
             sql = (Path(__file__).parent / 'migrations/007_application_fields.sql').read_text()
+            db.executescript('BEGIN IMMEDIATE;\n' + sql + '\nCOMMIT;')
+        if not db.execute('SELECT 1 FROM schema_migrations WHERE version=8').fetchone():
+            sql = (Path(__file__).parent / 'migrations/008_application_version.sql').read_text()
             db.executescript('BEGIN IMMEDIATE;\n' + sql + '\nCOMMIT;')
