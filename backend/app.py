@@ -452,10 +452,44 @@ def create_app(settings=None):
             return issue(db, settings, row['id'])
 
     @app.get('/v1/session')
+    @app.post('/v1/session')
+    @app.get('/v1/heartbeat')
+    @app.post('/v1/heartbeat')
     def session(request: Request):
         with connect(settings) as db:
-            user = authenticated(db, request)
-            return {'success': True, 'user_id': user['id'], 'subscription_until': user['subscription_until']}
+            user = authenticated(db, request, audience='client', count_request=False)
+
+            # --- Heartbeat kill checks ---
+            # If the user is banned/suspended → tell client to die
+            if user['status'] != 'active':
+                db.execute("DELETE FROM active_heartbeats WHERE user_id=?", (user['id'],))
+                deny('revoked')
+            # If subscription is frozen → tell client to die
+            if user['frozen_at'] is not None:
+                db.execute("DELETE FROM active_heartbeats WHERE user_id=?", (user['id'],))
+                deny('subscription_frozen', 403)
+            # If subscription expired → tell client to die
+            if user['subscription_until'] <= now():
+                db.execute("DELETE FROM active_heartbeats WHERE user_id=?", (user['id'],))
+                deny('subscription_expired', 403)
+            # If premium permission revoked → tell client to die
+            try:
+                entitled(db, user, 'premium')
+            except HTTPException:
+                db.execute("DELETE FROM active_heartbeats WHERE user_id=?", (user['id'],))
+                deny('permission_denied', 403)
+
+            t = now()
+            db.execute("CREATE TABLE IF NOT EXISTS active_heartbeats (user_id TEXT PRIMARY KEY, last_seen BIGINT NOT NULL, session_id TEXT, username TEXT)")
+            db.execute("""INSERT INTO active_heartbeats(user_id, last_seen, session_id, username) VALUES(?, ?, ?, ?)
+                ON CONFLICT (user_id) DO UPDATE SET last_seen=EXCLUDED.last_seen, session_id=EXCLUDED.session_id, username=EXCLUDED.username""",
+                (user['id'], t, user['session_id'], user['username']))
+            # Clean up stale heartbeats older than 3 minutes (user crashed / disconnected)
+            db.execute("DELETE FROM active_heartbeats WHERE last_seen < ?", (t - 180,))
+
+            return {'success': True, 'user_id': user['id'], 'username': user['username'],
+                    'subscription_until': user['subscription_until'], 'server_time': t,
+                    'action': 'continue'}
 
     @app.post('/v1/logout')
     def logout(request: Request):
@@ -648,6 +682,7 @@ def create_app(settings=None):
             if 'hardware_hash' in lic_cols:
                 db.execute("UPDATE licenses SET hardware_hash=NULL WHERE user_id=?", (user_id,))
             db.execute("UPDATE sessions SET revoked=1 WHERE user_id=?", (user_id,))
+            db.execute("DELETE FROM active_heartbeats WHERE user_id=?", (user_id,))
             audit(db, 'admin.user.reset-hwid', 'allowed', admin['id'], user_id)
             return {'success': True}
 
@@ -657,6 +692,7 @@ def create_app(settings=None):
             admin = authenticated(db, request, 'admin')
             db.execute("UPDATE users SET status='suspended' WHERE id=?", (user_id,))
             db.execute("UPDATE sessions SET revoked=1 WHERE user_id=?", (user_id,))
+            db.execute("DELETE FROM active_heartbeats WHERE user_id=?", (user_id,))
             audit(db, 'admin.user.ban', 'allowed', admin['id'], user_id)
             return {'success': True}
 
@@ -686,15 +722,33 @@ def create_app(settings=None):
     def overview(request: Request):
         with connect(settings) as db:
             admin = authenticated(db, request, 'admin')
+            t = now()
+            db.execute("CREATE TABLE IF NOT EXISTS active_heartbeats (user_id TEXT PRIMARY KEY, last_seen BIGINT NOT NULL, session_id TEXT, username TEXT)")
+            # Clean stale heartbeats (>3 min)
+            db.execute("DELETE FROM active_heartbeats WHERE last_seen < ?", (t - 180,))
+            online_count = db.execute("SELECT COUNT(*) FROM active_heartbeats WHERE last_seen >= ?", (t - 180,)).fetchone()[0]
             counts = {
                 'users': db.execute('SELECT COUNT(*) FROM users').fetchone()[0],
-                'subscribers': db.execute("SELECT COUNT(*) FROM users WHERE status='active' AND subscription_until>?", (now(),)).fetchone()[0],
-                'licenses': db.execute('SELECT COUNT(*) FROM licenses WHERE revoked=0 AND expires_at>?', (now(),)).fetchone()[0],
+                'subscribers': db.execute("SELECT COUNT(*) FROM users WHERE status='active' AND subscription_until>?", (t,)).fetchone()[0],
+                'licenses': db.execute('SELECT COUNT(*) FROM licenses WHERE revoked=0 AND expires_at>?', (t,)).fetchone()[0],
                 'files': db.execute('SELECT COUNT(*) FROM files WHERE enabled=1').fetchone()[0],
+                'online': online_count,
             }
             recent = db.execute('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 8').fetchall()
             audit(db, 'admin.overview.read', 'allowed', admin['id'])
             return {'success': True, 'counts': counts, 'recent': [dict(r) for r in recent]}
+
+    @app.get('/v1/admin/online')
+    def admin_online(request: Request):
+        """List currently online users (heartbeat within last 3 minutes)."""
+        with connect(settings) as db:
+            admin = authenticated(db, request, 'admin')
+            t = now()
+            db.execute("CREATE TABLE IF NOT EXISTS active_heartbeats (user_id TEXT PRIMARY KEY, last_seen BIGINT NOT NULL, session_id TEXT, username TEXT)")
+            db.execute("DELETE FROM active_heartbeats WHERE last_seen < ?", (t - 180,))
+            rows = db.execute("""SELECT h.user_id, h.username, h.last_seen, h.session_id
+                FROM active_heartbeats h WHERE h.last_seen >= ? ORDER BY h.last_seen DESC""", (t - 180,)).fetchall()
+            return {'success': True, 'online': [dict(r) for r in rows], 'count': len(rows), 'server_time': t}
 
     @app.get('/v1/admin/licenses')
     def list_licenses(request: Request, offset: int = 0):
@@ -970,6 +1024,7 @@ def create_app(settings=None):
                 db.execute('UPDATE licenses SET frozen_at=? WHERE id=?', (timestamp, license_id))
                 if license['user_id']:
                     db.execute('UPDATE users SET frozen_at=COALESCE(frozen_at,?) WHERE id=?', (timestamp, license['user_id']))
+                    db.execute('DELETE FROM active_heartbeats WHERE user_id=?', (license['user_id'],))
             else:
                 db.execute('UPDATE licenses SET expires_at=expires_at+?,frozen_at=NULL WHERE id=?', (timestamp-license['frozen_at'], license_id))
                 if license['user_id'] and not db.execute('SELECT 1 FROM licenses WHERE user_id=? AND frozen_at IS NOT NULL AND revoked=0', (license['user_id'],)).fetchone():
@@ -1000,9 +1055,11 @@ def create_app(settings=None):
             admin = authenticated(db, request, 'admin')
             license = db.execute('SELECT * FROM licenses WHERE id=?', (license_id,)).fetchone()
             db.execute('UPDATE licenses SET revoked=1,frozen_at=NULL WHERE id=?', (license_id,))
-            if license and license['user_id'] and license['frozen_at'] is not None:
-                if not db.execute('SELECT 1 FROM licenses WHERE user_id=? AND frozen_at IS NOT NULL AND revoked=0', (license['user_id'],)).fetchone():
-                    db.execute('UPDATE users SET subscription_until=subscription_until+?-COALESCE(frozen_at,?),frozen_at=NULL WHERE id=?', (now(), now(), license['user_id']))
+            if license and license['user_id']:
+                db.execute('DELETE FROM active_heartbeats WHERE user_id=?', (license['user_id'],))
+                if license['frozen_at'] is not None:
+                    if not db.execute('SELECT 1 FROM licenses WHERE user_id=? AND frozen_at IS NOT NULL AND revoked=0', (license['user_id'],)).fetchone():
+                        db.execute('UPDATE users SET subscription_until=subscription_until+?-COALESCE(frozen_at,?),frozen_at=NULL WHERE id=?', (now(), now(), license['user_id']))
             audit(db, 'admin.license.revoke', 'allowed', admin['id'], license_id)
             return {'success': True}
 
