@@ -33,10 +33,13 @@ def audit(db, event, outcome, actor=None, target=None):
                (now(), actor, event, target, outcome))
 
 
-def issue(db, settings, session_id):
+def issue(db, settings, session_id, nonce=None):
     access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
     session = db.execute('SELECT expires_at FROM sessions WHERE id=?', (session_id,)).fetchone()
     expiry = min(now() + settings.access_seconds, session['expires_at'])
     db.execute('INSERT INTO access_tokens VALUES(?,?,?)', (digest(access), session_id, expiry))
     db.execute('INSERT INTO refresh_tokens(hash,session_id) VALUES(?,?)', (digest(refresh), session_id))
-    return dict(success=True, access_token=access, refresh_token=refresh, expires_at=expiry)
+    resp = dict(success=True, access_token=access, refresh_token=refresh, expires_at=expiry, server_time=now())
+    if nonce:
+        resp['nonce'] = nonce
+    return resp
