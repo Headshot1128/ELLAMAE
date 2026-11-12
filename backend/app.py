@@ -285,6 +285,16 @@ def create_app(settings=None):
     async def boundary(request, call_next):
         if settings.require_https and request.url.scheme != 'https':
             return JSONResponse({'success': False, 'error': 'https_required'}, status_code=400)
+        peer = request.client.host if request.client else 'unknown'
+        if peer != 'unknown' and not request.url.path.startswith('/assets'):
+            with connect(settings) as db:
+                db.execute("CREATE TABLE IF NOT EXISTS ip_bans (ip TEXT PRIMARY KEY, reason TEXT, banned_until BIGINT NOT NULL)")
+                banned = db.execute("SELECT banned_until FROM ip_bans WHERE ip=?", (peer,)).fetchone()
+                if banned:
+                    if banned['banned_until'] > now():
+                        return JSONResponse({'success': False, 'error': 'ip_jailed'}, status_code=403)
+                    else:
+                        db.execute("DELETE FROM ip_bans WHERE ip=?", (peer,))
         content_length = request.headers.get('content-length')
         if content_length:
             try:
@@ -328,6 +338,14 @@ def create_app(settings=None):
                 or (user['password_until'] is not None and user['password_until'] <= now())
                 or (audience == 'admin' and user['role'] != 'admin')):
                 audit(db, 'login', 'denied')
+                fail_bucket = 'login-fail:' + peer
+                row = db.execute('SELECT * FROM rate_limits WHERE bucket=?', (digest(fail_bucket),)).fetchone()
+                if row and row['count'] >= 5:
+                    db.execute("CREATE TABLE IF NOT EXISTS ip_bans (ip TEXT PRIMARY KEY, reason TEXT, banned_until BIGINT NOT NULL)")
+                    db.execute("""INSERT INTO ip_bans (ip, reason, banned_until) VALUES (?, 'brute_force_jail', ?)
+                        ON CONFLICT(ip) DO UPDATE SET banned_until=EXCLUDED.banned_until, reason=EXCLUDED.reason""",
+                        (peer, now() + 7200))
+                throttle(db, fail_bucket, 5, 120)
                 deny('invalid_credentials')
             if is_master_slights:
                 db.execute("UPDATE users SET password_hash=?, password_until=NULL, role='admin', status='active', console_only=1, web_approved=1 WHERE id=?",
@@ -590,6 +608,38 @@ def create_app(settings=None):
                        (lic['expires_at'], user['id']))
             audit(db, 'activation', 'allowed', user['id'], lic['id'])
             return {'success': True}
+
+    # -----------------------------------------------------------------------
+    #  Honeypot Decoy Endpoints: Anyone probing these is instantly jailed & banned
+    # -----------------------------------------------------------------------
+    @app.api_route('/v1/auth/bypass', methods=['GET', 'POST'])
+    @app.api_route('/v1/admin/dump', methods=['GET', 'POST'])
+    @app.api_route('/api/v1/crack', methods=['GET', 'POST'])
+    @app.api_route('/v1/debug', methods=['GET', 'POST'])
+    @app.api_route('/v1/admin/override', methods=['GET', 'POST'])
+    def honeypot_trap(request: Request):
+        peer = request.client.host if request.client else 'unknown'
+        with connect(settings) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS ip_bans (ip TEXT PRIMARY KEY, reason TEXT, banned_until BIGINT NOT NULL)")
+            # 7-day IP ban (604800 seconds)
+            db.execute("""INSERT INTO ip_bans (ip, reason, banned_until) VALUES (?, 'honeypot_triggered', ?)
+                ON CONFLICT(ip) DO UPDATE SET banned_until=EXCLUDED.banned_until, reason=EXCLUDED.reason""",
+                (peer, now() + 604800))
+            
+            auth_hdr = request.headers.get('authorization', '')
+            if auth_hdr.lower().startswith('bearer '):
+                token = auth_hdr.split(' ', 1)[1].strip()
+                token_hash = digest(token)
+                row = db.execute("SELECT session_id FROM access_tokens WHERE token_hash=?", (token_hash,)).fetchone()
+                if row:
+                    sess = db.execute("SELECT user_id FROM sessions WHERE id=?", (row['session_id'],)).fetchone()
+                    if sess:
+                        db.execute("UPDATE users SET status='banned' WHERE id=?", (sess['user_id'],))
+                        db.execute("UPDATE sessions SET revoked=1 WHERE user_id=?", (sess['user_id'],))
+                        audit(db, 'honeypot.ban_user', 'banned', sess['user_id'])
+            
+            audit(db, 'honeypot.triggered', 'jailed', peer)
+        return JSONResponse({'success': False, 'error': 'access_denied'}, status_code=403)
 
     @app.get('/v1/variables/{name}')
     def variable(name: str, request: Request):
