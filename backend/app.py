@@ -207,6 +207,12 @@ def authenticated(db, request, audience='client', count_request=True):
         deny('expired')
     if row['password_until'] is not None and row['password_until'] <= now():
         deny('expired')
+    if audience == 'client':
+        sub_until = row['subscription_until'] if 'subscription_until' in row.keys() else None
+        if sub_until is None or sub_until <= now():
+            deny('expired', 401)
+        if 'frozen_at' in row.keys() and row['frozen_at'] is not None:
+            deny('subscription_frozen', 403)
     if row['audience'] != audience or (audience == 'admin' and row['role'] != 'admin'):
         deny('permission_denied', 403)
     if audience == 'admin' and not website_allowed(row, request.app.state.settings):
@@ -353,6 +359,15 @@ def create_app(settings=None):
             if audience == 'client' and (user['console_only'] or user['role'] == 'admin'):
                 audit(db, 'login', 'denied')
                 deny('invalid_credentials')
+            # Check subscription expiration for client logins
+            if audience == 'client':
+                sub_until = user['subscription_until'] if 'subscription_until' in user.keys() else None
+                if sub_until is None or sub_until <= now():
+                    audit(db, 'login.expired', 'denied', user['id'])
+                    deny('expired', 401)
+                if 'frozen_at' in user.keys() and user['frozen_at'] is not None:
+                    audit(db, 'login.subscription_frozen', 'denied', user['id'])
+                    deny('subscription_frozen', 403)
             # Check application status for client logins
             if audience == 'client':
                 app_id = (
