@@ -407,7 +407,8 @@ def create_app(settings=None):
             db.execute('INSERT INTO sessions VALUES(?,?,?,?,0,?)',
                        (sid, user['id'], audience, now() + session_seconds, hw_hash_for_session))
             audit(db, 'login', 'allowed', user['id'])
-            return issue(db, settings, sid)
+            nonce = request.headers.get('x-auth-nonce') or getattr(body, 'nonce', None)
+            return issue(db, settings, sid, nonce=nonce)
 
     @app.post('/v1/register', status_code=201)
     def register(body: Registration, request: Request):
@@ -546,9 +547,13 @@ def create_app(settings=None):
             # Clean up stale heartbeats older than 3 minutes (user crashed / disconnected)
             db.execute("DELETE FROM active_heartbeats WHERE last_seen < ?", (t - 180,))
 
-            return {'success': True, 'user_id': user['id'], 'username': user['username'],
+            resp = {'success': True, 'user_id': user['id'], 'username': user['username'],
                     'subscription_until': user['subscription_until'], 'server_time': t,
                     'action': 'continue'}
+            nonce = request.headers.get('x-auth-nonce') or request.query_params.get('nonce')
+            if nonce:
+                resp['nonce'] = nonce
+            return resp
 
     @app.post('/v1/logout')
     def logout(request: Request):
@@ -600,7 +605,11 @@ def create_app(settings=None):
                 audit(db, 'variable', 'denied', user['id'])
                 raise
             audit(db, 'variable', 'allowed', user['id'], row['id'])
-            return {'success': True, 'value': row['value']}
+            resp = {'success': True, 'value': row['value'], 'server_time': now()}
+            nonce = request.headers.get('x-auth-nonce') or request.query_params.get('nonce')
+            if nonce:
+                resp['nonce'] = nonce
+            return resp
 
     @app.get('/v1/files/{file_id}/content')
     def download(file_id: str, request: Request):
