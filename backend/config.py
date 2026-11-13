@@ -7,7 +7,7 @@ from pathlib import Path
 class Settings:
     database: str = 'data/auth.db'
     storage: str = 'data/private'
-    access_seconds: int = 300
+    access_seconds: int = 86400
     session_seconds: int = 86400
     require_https: bool = False
     registration: bool = False
